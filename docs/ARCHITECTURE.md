@@ -1,0 +1,176 @@
+# hunkr — Architecture
+
+`hunkr` is a terminal-first git diff reviewer built for the AI coding loop:
+
+> AI edits files → the diff auto-refreshes → you review file-by-file / hunk-by-hunk →
+> mark files reviewed → reviewed state clears automatically when a file changes again →
+> copy an AI-friendly reference for a hunk → repeat — without leaving the terminal.
+
+It is **not** a git client: no commit/push/PR/merge/host integration. Just review.
+
+This document is a living design reference. Sections marked _(planned: Mx)_ describe
+designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
+
+---
+
+## Design principles
+
+1. **Single source of truth.** One owned `App` struct (`src/app.rs`) holds all state and
+   is mutated **only on the UI thread** via event handlers. No `Arc<Mutex<_>>`, no shared
+   mutable state, no locks.
+2. **Message-passing concurrency.** Background producers (terminal input today; an fs
+   watcher + git worker in M3) never touch `App` — they push `Event`s onto one channel
+   (`src/event.rs`). This keeps the UI thread free so the app stays responsive under huge
+   repos and diff storms.
+3. **Event-driven, dirty-flagged repaint.** The loop blocks on the channel and only calls
+   `terminal.draw()` when `app.dirty` is set. Zero idle CPU; no frame timer. ratatui's
+   double-buffered backend diffs cells and writes only what changed.
+4. **Virtualized rendering.** The diff panel materializes only the visible window of rows
+   each frame, so a 200k-line diff costs the same per frame as a 30-line one.
+5. **Lazy everything.** The file list is cheap and eager; per-file diffs are fetched and
+   parsed only on selection; only the visible rows are rendered.
+6. **git CLI is the source of truth.** No git2/libgit2 — we shell out to the system `git`
+   so diff semantics (rename detection, EOL, attributes, textconv) match git exactly.
+
+---
+
+## Module map (`src/`)
+
+```
+main.rs          entry: CLI parse → repo discover → App::new → terminal guard → run loop
+cli.rs           clap args (optional repo path)
+event.rs         Event enum + input-reader thread feeding the channel
+terminal.rs      raw mode + alternate screen + panic-hook restore
+app.rs           App state (single source of truth) + update/navigation/input
+git/
+  command.rs     spawn `git` (capture / capture_diff / succeeds)
+  repo.rs        repo discovery (rev-parse --show-toplevel)
+  status.rs      parse `status --porcelain=v2 -z` → Vec<ChangedFile>
+  diff.rs        DiffBase + fetch_file_diff + parse_unified → FileDiff
+model/
+  file.rs        ChangedFile, ChangeKind
+  diff.rs        FileDiff, Hunk, DiffLine (byte-range backed)
+  tree.rs        arena FileTree (folder grouping, collapse/expand, flattened visible list)
+render/
+  viewport.rs    virtualization math (clamp_offset / visible_range)
+ui/
+  mod.rs         frame composition (tree | diff body + status bar) + render tests
+  tree_panel.rs  left panel: changed-file tree
+  diff_panel.rs  right panel: virtualized stacked diff
+  statusbar.rs   bottom bar: context + key hints
+```
+
+---
+
+## Data model
+
+Memory strategy: each file's full `git diff` output is stored **once** as `Arc<str>`;
+every `DiffLine` and hunk header is a `Range<usize>` into that backing string — no
+per-line allocation. Only the **selected** file's diff is hydrated; the rest stay as
+lightweight `ChangedFile` metadata. The tree is an **arena** (`Vec<TreeNode>` referenced
+by index — no `Rc`/pointers).
+
+- `ChangedFile { path, kind: ChangeKind, additions, deletions }` — one tree row.
+- `FileDiff { path, text: Arc<str>, hunks, is_binary }`.
+- `Hunk { header: Range, lines: Vec<DiffLine> }`.
+- `DiffLine { kind, old_no, new_no, text: Range }` (`text` excludes the `+`/`-`/` ` marker).
+- `FileTree { nodes: Vec<TreeNode>, root, visible: Vec<usize> }`; `visible` is the
+  flattened, in-order list of on-screen node indices given collapsed state.
+- `App` owns `files`, `tree`, `tree_cursor`, the hydrated `diff` + its flattened
+  `diff_rows` / `hunk_starts`, `scroll`, `current_hunk`, `focus`, and dirty/quit flags.
+
+`RowRef` (`Header(hunk)` | `Line(hunk, line)`) is the flattened render-row index built
+once on hydration; the diff panel slices a window out of it.
+
+---
+
+## Git interaction & diff parsing
+
+- **Diff scope:** everything that differs from the base — staged + unstaged + all
+  untracked, surfaced once per path. Base is `HEAD`, or git's empty-tree object
+  (`4b825d…`) when the repo has no commits yet (`DiffBase` in `git/diff.rs`).
+- **File list (eager, cheap):** `git -c core.quotepath=false status --porcelain=v2 -z
+  --untracked-files=all`. `-z` (NUL-delimited) is robust to spaces/unicode; v2 carries
+  rename info. Rename records consume a trailing original-path field.
+- **Per-file diff (lazy, on selection):** tracked → `git diff --no-color --no-ext-diff -M
+  <base> -- <path>`; untracked → `git diff --no-index -- /dev/null <path>` (exit code 1 is
+  expected and tolerated).
+- **Parser:** a line-by-line state machine; preamble before the first `@@` is skipped,
+  hunk bodies retained, line numbers tracked, binary diffs flagged. Cost is O(diff size),
+  bounded by *what changed* — a huge file with a small edit parses instantly.
+
+---
+
+## Rendering & virtualization
+
+The diff panel computes `viewport::visible_range(scroll, height, total)` and renders only
+those `diff_rows` into `Line`s each frame. Headers render bold cyan; lines render with an
+`old new ± ` gutter, green/red/gray by kind, with tab expansion (`unicode-width`).
+Panel heights are written back into `App` during render so scroll clamping and PageUp/Down
+know the page size.
+
+Verified by in-memory `TestBackend` render tests in `ui/mod.rs`.
+
+---
+
+## Event loop
+
+```
+loop {
+    if app.dirty { terminal.draw(ui::render); app.dirty = false; }
+    match rx.recv() {                 // blocks → zero idle CPU
+        Input(ev)         => app.on_key / resize,
+        Fs(paths)         => request git refresh,        // (planned: M3)
+        GitRefreshed(s)   => reconcile preserving state, // (planned: M3)
+    }
+    if app.should_quit { break; }
+}
+```
+
+---
+
+## Hot reload _(planned: M3)_
+
+An fs-watch thread (`notify`, recursive, **filtering `.git/`** to avoid an index/lock
+feedback loop, debounced ~120ms) nudges a git-worker thread, which recomputes the snapshot
+off the UI thread and emits `GitRefreshed`. Reconcile matches files by path and preserves
+selection, scroll, and current hunk when the selected file's diff hash is unchanged;
+otherwise it re-hydrates and clamps. This off-thread design is what makes refresh feel
+instant — the UI thread never blocks on `git`.
+
+## Reviewed state _(planned: M4)_
+
+Reviewed status is tied to a **diff hash**, not a filename. Status is derived, never
+stored: no record → `Unreviewed ●`; record hash == current → `Reviewed ✓`; mismatch →
+`ChangedAfterReview ↻`. Records persist to `.git/hunkr/review.json` (inside `.git/`, so
+never tracked; per-worktree), loaded on startup and saved debounced + on exit.
+
+## AI reference copy _(planned: M5)_
+
+`y` on a hunk builds an AI-ready prompt (file, change #, line range, the diff snippet, an
+`Issue:` slot) and copies via `arboard`, with an **OSC 52** fallback so it works over
+tmux/SSH.
+
+## Caching _(planned: M6)_
+
+Parsed diffs cached by `(path, mtime, size)` so refresh is O(changed files); bounded
+hydration (LRU) keeps memory flat on huge repos.
+
+---
+
+## Crates
+
+`ratatui` (TUI; re-exports `crossterm` for the backend/events — used via
+`ratatui::crossterm` to avoid version skew), `clap` (CLI), `crossbeam-channel` (event
+bus), `anyhow`/`thiserror` (errors), `unicode-width` (column math). Planned: `notify`
+(watch), `serde`/`serde_json` (persistence), `arboard` (clipboard), `ahash`/`seahash`
+(diff hash).
+
+## Risks
+
+- **`.git/` watch feedback loop** — must be filtered (highest-priority M3 correctness item).
+- **git subprocess latency on huge repos** — mitigated by off-thread git + caching.
+- **Terminal restoration on panic** — handled by the panic hook in `terminal.rs`.
+- **Clipboard over SSH/tmux** — needs the OSC 52 fallback.
+- **Renames / binary / unicode / tabs** — explicit `ChangeKind`, binary placeholder,
+  `unicode-width` + tab expansion.
