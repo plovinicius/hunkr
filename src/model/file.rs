@@ -26,7 +26,7 @@ impl ChangeKind {
             ChangeKind::Modified => 'M',
             ChangeKind::Deleted => 'D',
             ChangeKind::Renamed { .. } => 'R',
-            ChangeKind::Untracked => '?',
+            ChangeKind::Untracked => 'N',
             ChangeKind::TypeChange => 'T',
         }
     }

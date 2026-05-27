@@ -14,6 +14,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::cache::DiffCache;
 use crate::git::{self, diff::DiffBase};
+use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
 use crate::model::{diff::FileDiff, file::ChangedFile, snapshot::GitSnapshot, tree::FileTree};
 use crate::persist::ReviewStore;
@@ -86,6 +87,8 @@ pub struct App {
 
     pub focus: Focus,
     pub mode: Mode,
+    /// Glyph set used for rendering (ASCII by default, Unicode with --unicode).
+    pub glyphs: Glyphs,
     /// Active file-filter query (empty = no filter).
     pub filter: String,
     pub should_quit: bool,
@@ -143,6 +146,7 @@ impl App {
             hashes: HashMap::new(),
             focus: Focus::Tree,
             mode: Mode::Normal,
+            glyphs: Glyphs::ascii(),
             filter: String::new(),
             should_quit: false,
             dirty: true,

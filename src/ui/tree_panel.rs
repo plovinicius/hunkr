@@ -50,7 +50,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             let file = &app.files[fi];
             let status = app.review_status(fi);
             spans.push(Span::styled(
-                format!("{} ", status.glyph()),
+                format!("{} ", app.glyphs.status(status)),
                 Style::default().fg(status_color(status)),
             ));
             let name = if filtering {
@@ -69,7 +69,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 ));
             }
         } else {
-            let arrow = if node.collapsed { '▸' } else { '▾' };
+            let arrow = if node.collapsed {
+                app.glyphs.folder_closed
+            } else {
+                app.glyphs.folder_open
+            };
             spans.push(Span::styled(
                 format!("{arrow} {}/", node.name),
                 Style::default().fg(Color::Blue),

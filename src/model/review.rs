@@ -9,22 +9,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewStatus {
-    /// No review record. `●`
+    /// No review record.
     Unreviewed,
-    /// Reviewed and the diff still matches. `✓`
+    /// Reviewed and the diff still matches.
     Reviewed,
-    /// Reviewed earlier, but the diff has changed since. `↻`
+    /// Reviewed earlier, but the diff has changed since.
     ChangedAfterReview,
-}
-
-impl ReviewStatus {
-    pub fn glyph(self) -> char {
-        match self {
-            ReviewStatus::Unreviewed => '●',
-            ReviewStatus::Reviewed => '✓',
-            ReviewStatus::ChangedAfterReview => '↻',
-        }
-    }
 }
 
 /// What the user marked: the diff hash at review time, plus when.

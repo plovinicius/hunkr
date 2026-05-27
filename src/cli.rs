@@ -13,4 +13,8 @@ use clap::Parser;
 pub struct Args {
     /// Path inside the git repository to review (defaults to the current directory).
     pub path: Option<PathBuf>,
+
+    /// Use Unicode icons (✓ ● ↻ …) instead of the ASCII-safe defaults.
+    #[arg(long)]
+    pub unicode: bool,
 }

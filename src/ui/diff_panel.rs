@@ -46,7 +46,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
     if fd.is_binary {
         f.render_widget(
-            Paragraph::new("Binary file — no textual diff").style(dim),
+            Paragraph::new("Binary file - no textual diff").style(dim),
             inner,
         );
         return;

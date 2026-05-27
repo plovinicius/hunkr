@@ -10,6 +10,7 @@ mod cache;
 mod cli;
 mod event;
 mod git;
+mod glyphs;
 mod model;
 mod persist;
 mod reference;
@@ -34,6 +35,11 @@ fn main() -> Result<()> {
     };
     let repo_root = git::repo::discover(&start)?;
     let mut app = App::new(repo_root)?;
+    app.glyphs = if args.unicode {
+        glyphs::Glyphs::unicode()
+    } else {
+        glyphs::Glyphs::ascii()
+    };
 
     terminal::install_panic_hook();
     let mut tui = terminal::init()?;

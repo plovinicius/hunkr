@@ -21,9 +21,14 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
 ## Install & run
 
 ```sh
-cargo run            # review the repo in the current directory
-cargo run -- PATH    # review the repo containing PATH
+cargo run                  # review the repo in the current directory
+cargo run -- PATH          # review the repo containing PATH
+cargo run -- --unicode     # use Unicode icons (✓ ● ↻) instead of ASCII
 ```
+
+Icons are ASCII by default (`[x]` reviewed, `[ ]` unreviewed, `[!]` changed-after-review,
+`>`/`v` folders) so they render in any terminal/font; pass `--unicode` for the prettier
+symbols if your font supports them.
 
 Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 (staged + unstaged + untracked), or the empty tree when the repo has no commits yet.

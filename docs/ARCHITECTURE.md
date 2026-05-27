@@ -173,6 +173,15 @@ memory stays flat (cap `DIFF_CACHE_CAP`). Hot-reload deliberately **bypasses** t
 (`load_diff(use_cache=false)`) so a fresh-on-disk change can never be masked by a
 coarse-resolution mtime; deleted files (no stat) are simply never cached.
 
+## Glyphs
+
+All non-text markers (review status, folder arrows, error prefix, filter cursor, status-bar
+separators) come from one `Glyphs` set in `src/glyphs.rs`. The default is **ASCII-safe**
+(`[x]`/`[ ]`/`[!]`, `>`/`v`) so it renders in any terminal/font/tmux; `--unicode` swaps in
+`✓ ● ↻ ▸ ▾`. The status bar measures text width (`unicode-width`) and only draws the
+right-aligned key hints when they fit, so they never clobber the left-side counts on a
+narrow terminal.
+
 ## Filtering & help
 
 `/` enters filter mode: the tree collapses to a flat, case-insensitive list of files whose
