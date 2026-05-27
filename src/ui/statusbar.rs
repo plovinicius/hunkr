@@ -41,8 +41,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             String::new()
         };
+        // A space after each icon (some Unicode glyphs render wide) and a wider
+        // gap between groups so the counts stay legible.
         format!(
-            " hunkr{sep}{}{reviewed} {}{unreviewed} {}{changed}{sep}{hunk}{filter}",
+            " hunkr{sep}{} {reviewed}  {} {unreviewed}  {} {changed}{sep}{hunk}{filter}",
             g.reviewed, g.unreviewed, g.changed,
         )
     };
@@ -50,9 +52,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hints = if app.mode == Mode::Filter {
         format!(" Enter apply{sep}Esc cancel ")
     } else {
-        format!(
-            " j/k move{sep}n/p hunk{sep}r review{sep}y copy{sep}/ filter{sep}? help{sep}q quit "
-        )
+        format!(" n/p hunk{sep}r review{sep}y copy{sep}/ filter{sep}? help{sep}q quit ")
     };
 
     // Background first, then the left text. The right-aligned hints are drawn

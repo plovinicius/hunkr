@@ -73,7 +73,7 @@ mod tests {
         ];
         let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
 
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| render(f, &mut app)).unwrap();
         let text = buffer_text(&term);
 
@@ -94,7 +94,7 @@ mod tests {
         // Status bar chrome + review counts (2 unreviewed).
         assert!(text.contains("hunkr"), "status bar missing:\n{text}");
         assert!(
-            text.contains("[x]0 [ ]2 [!]0"),
+            text.contains("[x] 0  [ ] 2  [!] 0"),
             "review counts missing:\n{text}"
         );
         assert!(text.contains("q quit"), "key hints missing:\n{text}");
@@ -119,7 +119,7 @@ mod tests {
         );
         app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
 
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| render(f, &mut app)).unwrap();
         let text = buffer_text(&term);
 
@@ -147,7 +147,7 @@ mod tests {
         let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
         app.mode = Mode::Help;
 
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| render(f, &mut app)).unwrap();
         let text = buffer_text(&term);
 
