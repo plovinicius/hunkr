@@ -51,9 +51,14 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 **🎉 MVP complete** — the full review loop works: tree → virtualized diff → hot reload →
 reviewed state → AI reference copy, with file filter and help.
 
+## Post-MVP
+
+- ✅ **Side-by-side diff** (`s` toggles unified ↔ side-by-side): paired old/new columns,
+  virtualized like the unified view; `src/ui/diff_panel.rs` + `build_side_rows` in `app.rs`.
+
 ## Later (not MVP)
 
-Side-by-side diff toggle · syntax highlighting · minimap · revert/accept-reject hunk ·
+Syntax highlighting · minimap · revert/accept-reject hunk ·
 inline AI comments · open-in-editor-at-line · session history · multi-repo · daemon mode ·
 performance telemetry · config-file keybindings.
 

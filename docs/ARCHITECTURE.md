@@ -184,6 +184,16 @@ the following space and misaligns the row. The status bar measures text width
 (`unicode-width`) and only draws the right-aligned key hints when they fit, so they never
 clobber the left-side counts on a narrow terminal.
 
+## Diff views
+
+`s` toggles `App::view` between `Unified` (stacked) and `SideBySide` (old left / new right).
+On hydration the diff is flattened into **both** a unified row list (`diff_rows`) and a
+side-by-side row list (`side_rows`, built by `build_side_rows`, which pairs each run of
+deletions with the additions that follow it). Navigation/scroll operate on whichever list
+is active via `active_row_count`/`active_hunk_starts`, and both render paths are virtualized
+to the visible window. The side-by-side renderer truncates/pads each column to a fixed width
+(`unicode-width`) so the two sides stay aligned.
+
 ## Filtering & help
 
 `/` enters filter mode: the tree collapses to a flat, case-insensitive list of files whose

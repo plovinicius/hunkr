@@ -139,6 +139,37 @@ mod tests {
     }
 
     #[test]
+    fn renders_side_by_side() {
+        use crate::app::ViewMode;
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        let files = vec![ChangedFile::new(
+            PathBuf::from("foo.rs"),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        let raw = concat!("@@ -1,2 +1,2 @@\n", " keep\n", "-old line\n", "+new line\n",);
+        app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
+        app.view = ViewMode::SideBySide;
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            text.contains("[side-by-side]"),
+            "mode label missing:\n{text}"
+        );
+        assert!(text.contains("keep"), "context missing:\n{text}");
+        // The deleted and added lines sit on the same row, one per side.
+        let same_row = text
+            .lines()
+            .any(|l| l.contains("old line") && l.contains("new line"));
+        assert!(same_row, "old/new not rendered side by side:\n{text}");
+    }
+
+    #[test]
     fn help_overlay_lists_keybindings() {
         let files = vec![ChangedFile::new(
             PathBuf::from("a.rs"),

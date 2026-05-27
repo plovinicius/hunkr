@@ -16,7 +16,12 @@ use crate::cache::DiffCache;
 use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
-use crate::model::{diff::FileDiff, file::ChangedFile, snapshot::GitSnapshot, tree::FileTree};
+use crate::model::{
+    diff::{FileDiff, LineKind},
+    file::ChangedFile,
+    snapshot::GitSnapshot,
+    tree::FileTree,
+};
 use crate::persist::ReviewStore;
 use crate::render::viewport;
 
@@ -47,12 +52,33 @@ pub enum Mode {
     Help,
 }
 
-/// One rendered row of the diff panel: either a hunk header or a body line.
-/// Built once on hydration; the panel slices a window out of this list.
+/// How the diff panel lays out a file's changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    /// Stacked unified diff (default).
+    Unified,
+    /// Old version on the left, new version on the right.
+    SideBySide,
+}
+
+/// One rendered row of the unified diff: a hunk header or a body line
+/// `(hunk, line)`. Built once on hydration; the panel slices a window out.
 #[derive(Clone, Copy)]
 pub enum RowRef {
     Header(usize),
     Line(usize, usize),
+}
+
+/// One rendered row of the side-by-side diff. `Pair` holds the old-side and
+/// new-side line references `(hunk, line)`; either may be absent when one side
+/// has no corresponding line (a pure add or delete).
+#[derive(Clone, Copy)]
+pub enum SideRow {
+    Header(usize),
+    Pair {
+        left: Option<(usize, usize)>,
+        right: Option<(usize, usize)>,
+    },
 }
 
 pub struct App {
@@ -67,10 +93,14 @@ pub struct App {
     /// Hydrated diff for the currently selected file (if any). `Arc` so the
     /// cache and the app can share one parsed copy cheaply.
     pub diff: Option<Arc<FileDiff>>,
-    /// Flattened render rows for `diff`.
+    /// Flattened render rows for `diff` (unified view).
     pub diff_rows: Vec<RowRef>,
-    /// Row index where each hunk's header sits (parallel to `diff.hunks`).
+    /// Row index where each hunk's header sits in `diff_rows`.
     pub hunk_starts: Vec<usize>,
+    /// Flattened render rows for the side-by-side view.
+    pub side_rows: Vec<SideRow>,
+    /// Row index where each hunk's header sits in `side_rows`.
+    pub side_hunk_starts: Vec<usize>,
     /// Which file index `diff` belongs to, to avoid redundant reloads.
     pub diff_file: Option<usize>,
     /// LRU cache of parsed diffs, keyed by file signature.
@@ -87,6 +117,7 @@ pub struct App {
 
     pub focus: Focus,
     pub mode: Mode,
+    pub view: ViewMode,
     /// Glyph set used for rendering (ASCII by default, Unicode with --unicode).
     pub glyphs: Glyphs,
     /// Active file-filter query (empty = no filter).
@@ -138,6 +169,8 @@ impl App {
             diff: None,
             diff_rows: Vec::new(),
             hunk_starts: Vec::new(),
+            side_rows: Vec::new(),
+            side_hunk_starts: Vec::new(),
             diff_file: None,
             cache: DiffCache::new(DIFF_CACHE_CAP),
             scroll: 0,
@@ -146,6 +179,7 @@ impl App {
             hashes: HashMap::new(),
             focus: Focus::Tree,
             mode: Mode::Normal,
+            view: ViewMode::Unified,
             glyphs: Glyphs::ascii(),
             filter: String::new(),
             should_quit: false,
@@ -410,6 +444,8 @@ impl App {
         self.diff = None;
         self.diff_rows.clear();
         self.hunk_starts.clear();
+        self.side_rows.clear();
+        self.side_hunk_starts.clear();
     }
 
     /// Inject an already-parsed diff (rendering tests use this to exercise the
@@ -424,6 +460,7 @@ impl App {
     }
 
     fn rebuild_rows(&mut self, fd: &FileDiff) {
+        // Unified rows: header followed by each body line.
         let mut rows = Vec::new();
         let mut starts = Vec::with_capacity(fd.hunks.len());
         for (h, hunk) in fd.hunks.iter().enumerate() {
@@ -435,6 +472,10 @@ impl App {
         }
         self.diff_rows = rows;
         self.hunk_starts = starts;
+
+        let (side_rows, side_starts) = build_side_rows(fd);
+        self.side_rows = side_rows;
+        self.side_hunk_starts = side_starts;
     }
 
     // ── navigation ───────────────────────────────────────────────────────
@@ -499,8 +540,35 @@ impl App {
         self.dirty = true;
     }
 
+    /// Number of render rows in the active view.
+    fn active_row_count(&self) -> usize {
+        match self.view {
+            ViewMode::Unified => self.diff_rows.len(),
+            ViewMode::SideBySide => self.side_rows.len(),
+        }
+    }
+
+    /// Per-hunk header row indices for the active view.
+    fn active_hunk_starts(&self) -> &[usize] {
+        match self.view {
+            ViewMode::Unified => &self.hunk_starts,
+            ViewMode::SideBySide => &self.side_hunk_starts,
+        }
+    }
+
+    /// Toggle unified ↔ side-by-side, keeping the current hunk in view.
+    fn toggle_view(&mut self) {
+        self.view = match self.view {
+            ViewMode::Unified => ViewMode::SideBySide,
+            ViewMode::SideBySide => ViewMode::Unified,
+        };
+        self.scroll_to_current_hunk();
+        self.dirty = true;
+    }
+
     fn max_scroll(&self) -> usize {
-        self.diff_rows.len().saturating_sub(self.diff_height.max(1))
+        self.active_row_count()
+            .saturating_sub(self.diff_height.max(1))
     }
 
     fn scroll_by(&mut self, delta: isize) {
@@ -509,21 +577,23 @@ impl App {
         } else {
             self.scroll + delta as usize
         };
-        self.scroll = viewport::clamp_offset(target, self.diff_height.max(1), self.diff_rows.len());
+        self.scroll =
+            viewport::clamp_offset(target, self.diff_height.max(1), self.active_row_count());
         self.sync_hunk_from_scroll();
         self.dirty = true;
     }
 
     fn next_hunk(&mut self) {
-        if self.hunk_starts.is_empty() {
+        let n = self.active_hunk_starts().len();
+        if n == 0 {
             return;
         }
-        self.current_hunk = (self.current_hunk + 1).min(self.hunk_starts.len() - 1);
+        self.current_hunk = (self.current_hunk + 1).min(n - 1);
         self.scroll_to_current_hunk();
     }
 
     fn prev_hunk(&mut self) {
-        if self.hunk_starts.is_empty() {
+        if self.active_hunk_starts().is_empty() {
             return;
         }
         self.current_hunk = self.current_hunk.saturating_sub(1);
@@ -531,9 +601,10 @@ impl App {
     }
 
     fn scroll_to_current_hunk(&mut self) {
-        if let Some(&row) = self.hunk_starts.get(self.current_hunk) {
+        let row = self.active_hunk_starts().get(self.current_hunk).copied();
+        if let Some(row) = row {
             self.scroll =
-                viewport::clamp_offset(row, self.diff_height.max(1), self.diff_rows.len());
+                viewport::clamp_offset(row, self.diff_height.max(1), self.active_row_count());
         }
         self.dirty = true;
     }
@@ -541,9 +612,10 @@ impl App {
     /// Keep `current_hunk` in sync after free scrolling: the active hunk is the
     /// last one whose header is at or above the top of the viewport.
     fn sync_hunk_from_scroll(&mut self) {
+        let scroll = self.scroll;
         let mut h = 0;
-        for (i, &start) in self.hunk_starts.iter().enumerate() {
-            if start <= self.scroll {
+        for (i, &start) in self.active_hunk_starts().iter().enumerate() {
+            if start <= scroll {
                 h = i;
             } else {
                 break;
@@ -641,6 +713,7 @@ impl App {
             },
             (KeyCode::Char('n'), _) => self.next_hunk(),
             (KeyCode::Char('p'), _) => self.prev_hunk(),
+            (KeyCode::Char('s'), _) => self.toggle_view(),
             (KeyCode::Char('r'), _) => self.mark_reviewed(),
             (KeyCode::Char('u'), _) => self.unmark_reviewed(),
             (KeyCode::Char('y'), _) => self.copy_reference(),
@@ -662,6 +735,56 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Transform a parsed diff into side-by-side rows. Within each hunk, context
+/// lines appear on both sides; a run of deletions is paired row-for-row with
+/// the run of additions that follows it (extra lines on either side get an
+/// empty cell on the other). Returns the rows and each hunk header's row index.
+fn build_side_rows(fd: &FileDiff) -> (Vec<SideRow>, Vec<usize>) {
+    let mut rows = Vec::new();
+    let mut starts = Vec::with_capacity(fd.hunks.len());
+
+    for (h, hunk) in fd.hunks.iter().enumerate() {
+        starts.push(rows.len());
+        rows.push(SideRow::Header(h));
+
+        let lines = &hunk.lines;
+        let mut i = 0;
+        while i < lines.len() {
+            match lines[i].kind {
+                LineKind::Context | LineKind::NoNewline => {
+                    rows.push(SideRow::Pair {
+                        left: Some((h, i)),
+                        right: Some((h, i)),
+                    });
+                    i += 1;
+                }
+                LineKind::Del | LineKind::Add => {
+                    let del_start = i;
+                    while i < lines.len() && lines[i].kind == LineKind::Del {
+                        i += 1;
+                    }
+                    let dels = del_start..i;
+                    let add_start = i;
+                    while i < lines.len() && lines[i].kind == LineKind::Add {
+                        i += 1;
+                    }
+                    let adds = add_start..i;
+
+                    let pairs = dels.len().max(adds.len());
+                    for k in 0..pairs {
+                        rows.push(SideRow::Pair {
+                            left: dels.clone().nth(k).map(|l| (h, l)),
+                            right: adds.clone().nth(k).map(|l| (h, l)),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    (rows, starts)
 }
 
 #[cfg(test)]
@@ -736,6 +859,42 @@ mod tests {
         assert_eq!(a.mode, Mode::Normal);
         assert!(!a.is_filtering());
         assert!(a.tree.visible.len() > 1);
+    }
+
+    #[test]
+    fn side_rows_pair_deletions_with_additions() {
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        let raw = concat!(
+            "@@ -1,4 +1,4 @@\n",
+            " ctx\n",
+            "-old1\n",
+            "-old2\n",
+            "+new1\n",
+            "+new2\n",
+            "+new3\n",
+        );
+        let fd = parse_unified(Arc::from(raw), PathBuf::from("x"));
+        let (rows, starts) = build_side_rows(&fd);
+
+        assert_eq!(starts, vec![0]);
+        assert!(matches!(rows[0], SideRow::Header(0)));
+        // ctx pair + max(2 deletions, 3 additions) = 4 pairs.
+        let pairs = rows
+            .iter()
+            .filter(|r| matches!(r, SideRow::Pair { .. }))
+            .count();
+        assert_eq!(pairs, 4);
+        // The 2 deletions pair with the first 2 additions; the 3rd addition has
+        // an empty left cell.
+        match rows[4] {
+            SideRow::Pair { left, right } => {
+                assert!(left.is_none(), "expected empty old side for extra addition");
+                assert!(right.is_some());
+            }
+            _ => panic!("expected a Pair row"),
+        }
     }
 
     #[test]

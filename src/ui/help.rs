@@ -10,6 +10,7 @@ const KEYS: &[(&str, &str)] = &[
     ("j / k", "move cursor / scroll diff"),
     ("n / p", "next / previous hunk"),
     ("] / [", "next / previous file"),
+    ("s", "toggle unified / side-by-side"),
     ("g / G", "top / bottom of diff"),
     ("Tab", "switch tree / diff focus"),
     ("Enter", "expand-collapse folder / focus diff"),

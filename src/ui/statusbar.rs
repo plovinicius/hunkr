@@ -52,7 +52,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hints = if app.mode == Mode::Filter {
         format!(" Enter apply{sep}Esc cancel ")
     } else {
-        format!(" n/p hunk{sep}r review{sep}y copy{sep}/ filter{sep}? help{sep}q quit ")
+        format!(" n/p hunk{sep}s split{sep}r review{sep}y copy{sep}? help{sep}q quit ")
     };
 
     // Background first, then the left text. The right-aligned hints are drawn
