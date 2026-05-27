@@ -11,11 +11,16 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, Focus, RowRef, SideRow, ViewMode};
+use crate::glyphs::Glyphs;
 use crate::model::diff::{FileDiff, LineKind};
 use crate::render::viewport;
 
 /// Tab stop width used when expanding tabs for display.
 const TAB_WIDTH: usize = 4;
+
+/// Background fill for the hunk the `n`/`p` cursor is on, so the current change
+/// reads at a glance.
+const CURRENT_HUNK_BG: Color = Color::Indexed(238);
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Diff;
@@ -76,11 +81,11 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
         match row {
             RowRef::Header(h) => {
                 let text = fd.slice(&fd.hunks[h].header);
-                lines.push(Line::styled(
-                    text.to_string(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                lines.push(header_line(
+                    text,
+                    h == app.current_hunk,
+                    &app.glyphs,
+                    inner.width as usize,
                 ));
             }
             RowRef::Line(h, l) => {
@@ -120,13 +125,8 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     for &row in &app.side_rows[window] {
         match row {
             SideRow::Header(h) => {
-                let text = fit(fd.slice(&fd.hunks[h].header), width);
-                lines.push(Line::styled(
-                    text,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
+                let text = fd.slice(&fd.hunks[h].header);
+                lines.push(header_line(text, h == app.current_hunk, &app.glyphs, width));
             }
             SideRow::Pair { left, right } => {
                 let (lc, ls) = side_cell(fd, left, left_w, Side::Old);
@@ -184,6 +184,27 @@ fn side_cell(
     let content = expand_tabs(fd.slice(&dl.text));
     let text = fit(&format!("{:>4} {marker} {content}", fmt_no(no)), width);
     (text, Style::default().fg(color))
+}
+
+/// Build a styled hunk-header line. The hunk the `n`/`p` cursor is on gets a
+/// marker, a contrasting colour, and a full-width background fill so it's
+/// obvious which change is selected; others keep a blank marker column so the
+/// header text doesn't shift as you navigate. The line is padded/truncated to
+/// `width` so the highlight fills the row.
+fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<'a> {
+    let marker = if current { g.hunk_cursor } else { ' ' };
+    let body = fit(&format!("{marker} {text}"), width);
+    let style = if current {
+        Style::default()
+            .fg(Color::Yellow)
+            .bg(CURRENT_HUNK_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    Line::styled(body, style)
 }
 
 fn line_marker(kind: LineKind) -> (char, Color) {

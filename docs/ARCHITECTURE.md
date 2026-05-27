@@ -104,8 +104,10 @@ once on hydration; the diff panel slices a window out of it.
 ## Rendering & virtualization
 
 The diff panel computes `viewport::visible_range(scroll, height, total)` and renders only
-those `diff_rows` into `Line`s each frame. Headers render bold cyan; lines render with an
-`old new ± ` gutter, green/red/gray by kind, with tab expansion (`unicode-width`).
+those `diff_rows` into `Line`s each frame. Headers render bold cyan — except the hunk the
+`n`/`p` cursor is on, which gets a marker, yellow text, and a full-width background fill so
+the current change is obvious; lines render with an `old new ± ` gutter, green/red/gray by
+kind, with tab expansion (`unicode-width`).
 Panel heights are written back into `App` during render so scroll clamping and PageUp/Down
 (and Shift+arrows, which alias them) know the page size; the diff panel's left column
 (`diff_x`) is recorded too so mouse-wheel events route to the panel under the cursor.

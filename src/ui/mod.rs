@@ -141,6 +141,47 @@ mod tests {
     }
 
     #[test]
+    fn current_hunk_header_is_marked() {
+        use crate::git::diff::parse_unified;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::sync::Arc;
+
+        let files = vec![ChangedFile::new(
+            PathBuf::from("foo.rs"),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        let raw = concat!(
+            "@@ -1,1 +1,1 @@ first\n",
+            "-a\n",
+            "+b\n",
+            "@@ -10,1 +10,1 @@ second\n",
+            "-c\n",
+            "+d\n",
+        );
+        app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
+
+        // Advance to the second hunk, as `n` does.
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        let first = text.lines().find(|l| l.contains("first")).unwrap();
+        let second = text.lines().find(|l| l.contains("second")).unwrap();
+        // The current hunk's header carries the `>` marker; the other doesn't.
+        assert!(
+            second.contains("> @@"),
+            "current hunk header should be marked:\n{text}"
+        );
+        assert!(
+            !first.contains("> @@"),
+            "non-current hunk header should not be marked:\n{text}"
+        );
+    }
+
+    #[test]
     fn renders_side_by_side() {
         use crate::app::ViewMode;
         use crate::git::diff::parse_unified;
