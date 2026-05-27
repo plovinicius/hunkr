@@ -55,11 +55,15 @@ reviewed state → AI reference copy, with file filter and help.
 
 - ✅ **Side-by-side diff** (`s` toggles unified ↔ side-by-side): paired old/new columns,
   virtualized like the unified view; `src/ui/diff_panel.rs` + `build_side_rows` in `app.rs`.
+- ✅ **Open in `$EDITOR`** (`e`): suspends the TUI and opens the selected file in
+  `$VISUAL`/`$EDITOR` at the top-of-viewport line (`+LINE` for editors that support it),
+  then restores and redraws. Input moved onto the UI thread so the editor gets the terminal
+  exclusively (`open_editor` in `main.rs`).
 
 ## Later (not MVP)
 
 Syntax highlighting · minimap · revert/accept-reject hunk ·
-inline AI comments · open-in-editor-at-line · session history · multi-repo · daemon mode ·
+inline AI comments · session history · multi-repo · daemon mode ·
 performance telemetry · config-file keybindings.
 
 ## Testing

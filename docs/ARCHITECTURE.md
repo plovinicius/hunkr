@@ -18,12 +18,12 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 1. **Single source of truth.** One owned `App` struct (`src/app.rs`) holds all state and
    is mutated **only on the UI thread** via event handlers. No `Arc<Mutex<_>>`, no shared
    mutable state, no locks.
-2. **Message-passing concurrency.** Background producers (terminal input today; an fs
-   watcher + git worker in M3) never touch `App` — they push `Event`s onto one channel
-   (`src/event.rs`). This keeps the UI thread free so the app stays responsive under huge
-   repos and diff storms.
-3. **Event-driven, dirty-flagged repaint.** The loop blocks on the channel and only calls
-   `terminal.draw()` when `app.dirty` is set. Zero idle CPU; no frame timer. ratatui's
+2. **Message-passing concurrency.** Background producers (an fs watcher + a git worker)
+   never touch `App` — they push `Event`s onto one channel (`src/event.rs`). Terminal input
+   is read on the UI thread itself. This keeps the UI thread free so the app stays
+   responsive under huge repos and diff storms.
+3. **Dirty-flagged repaint.** `terminal.draw()` runs only when `app.dirty` is set — no frame
+   timer. The loop polls input with a short timeout and otherwise idles cheaply; ratatui's
    double-buffered backend diffs cells and writes only what changed.
 4. **Virtualized rendering.** The diff panel materializes only the visible window of rows
    each frame, so a 200k-line diff costs the same per frame as a 30-line one.
@@ -39,7 +39,7 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 ```
 main.rs          entry: CLI parse → repo discover → App::new → terminal guard → run loop
 cli.rs           clap args (optional repo path)
-event.rs         Event enum + input-reader thread feeding the channel
+event.rs         background Event enum + git-worker thread feeding the channel
 terminal.rs      raw mode + alternate screen + panic-hook restore
 app.rs           App state (single source of truth) + update/navigation/input
 git/
@@ -115,17 +115,38 @@ Verified by in-memory `TestBackend` render tests in `ui/mod.rs`.
 
 ## Event loop
 
+The UI thread reads terminal input **directly** (polling), and drains background events
+(filesystem watch + git worker) from a channel. Input is read on this thread — not a
+dedicated one — so that shelling out to `$EDITOR` can hand the terminal over exclusively
+without a second reader stealing keystrokes (see "Open in editor").
+
 ```
 loop {
     if app.dirty { terminal.draw(ui::render); app.dirty = false; }
-    match rx.recv() {                 // blocks → zero idle CPU
-        Input(ev)         => app.on_key / resize,
-        Fs(paths)         => request git refresh,        // (planned: M3)
-        GitRefreshed(s)   => reconcile preserving state, // (planned: M3)
+    if event::poll(POLL_INTERVAL)? {        // returns instantly on a keypress
+        handle(event::read());              // + drain any further pending input
     }
+    while let Ok(ev) = rx.try_recv() {      // non-blocking background events
+        Fs        => request git refresh,
+        Refreshed => reconcile preserving state,
+        Error     => flash in status bar,
+    }
+    if let Some(req) = app.take_editor_request() { open_editor(req); }
     if app.should_quit { break; }
 }
 ```
+
+`POLL_INTERVAL` (~100ms) only bounds how soon background refreshes are noticed; input
+latency is unaffected (poll wakes immediately on a key). Idle cost is one cheap poll per
+interval.
+
+## Open in editor
+
+`e` records an `EditorRequest` (path + the line at the top of the diff viewport). The run
+loop then suspends the TUI (`terminal::restore`), runs `$VISUAL`/`$EDITOR` (falling back to
+`vi`) as a foreground child — adding `+LINE` for editors known to accept it — re-enters the
+alternate screen, and forces a redraw. The subsequent file save trips the watcher, so the
+diff refreshes on return.
 
 ---
 

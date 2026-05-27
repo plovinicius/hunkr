@@ -17,8 +17,8 @@ use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
 use crate::model::{
-    diff::{FileDiff, LineKind},
-    file::ChangedFile,
+    diff::{FileDiff, Hunk, LineKind},
+    file::{ChangeKind, ChangedFile},
     snapshot::GitSnapshot,
     tree::FileTree,
 };
@@ -50,6 +50,14 @@ pub enum Mode {
     Filter,
     /// Help overlay is open.
     Help,
+}
+
+/// A request to open a file in `$EDITOR`, consumed by the run loop (which owns
+/// the terminal and can suspend/restore it around the editor).
+#[derive(Debug, Clone)]
+pub struct EditorRequest {
+    pub path: PathBuf,
+    pub line: u32,
 }
 
 /// How the diff panel lays out a file's changes.
@@ -130,6 +138,10 @@ pub struct App {
 
     pub status_msg: Option<String>,
     pub error: Option<String>,
+
+    /// Set when the user asks to open the current file in `$EDITOR`; the run
+    /// loop takes and fulfils it.
+    pub pending_editor: Option<EditorRequest>,
 }
 
 impl App {
@@ -187,6 +199,7 @@ impl App {
             diff_height: 0,
             status_msg: None,
             error: None,
+            pending_editor: None,
         }
     }
 
@@ -263,6 +276,52 @@ impl App {
             Err(e) => self.error = Some(format!("copy failed: {e}")),
         }
         self.dirty = true;
+    }
+
+    // ── open in editor ─────────────────────────────────────────────────────
+
+    /// Request that the run loop open the selected file in `$EDITOR` at the
+    /// line currently at the top of the diff viewport.
+    fn open_in_editor(&mut self) {
+        let Some(fi) = self.current_file_index() else {
+            return;
+        };
+        if matches!(self.files[fi].kind, ChangeKind::Deleted) {
+            self.error = Some("file was deleted; nothing to open".into());
+            self.dirty = true;
+            return;
+        }
+        let line = self.current_line().unwrap_or(1);
+        self.pending_editor = Some(EditorRequest {
+            path: self.files[fi].path.clone(),
+            line,
+        });
+    }
+
+    /// Take a pending editor request, if any (called by the run loop).
+    pub fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.pending_editor.take()
+    }
+
+    /// The new-file line number at the top of the diff viewport (falling back to
+    /// the old-file number for deletions), used as the editor's target line.
+    fn current_line(&self) -> Option<u32> {
+        let fd = self.diff.as_ref()?;
+        match self.view {
+            ViewMode::Unified => match self.diff_rows.get(self.scroll)? {
+                RowRef::Header(h) => first_line_no(&fd.hunks[*h]),
+                RowRef::Line(h, l) => {
+                    let dl = &fd.hunks[*h].lines[*l];
+                    dl.new_no.or(dl.old_no)
+                }
+            },
+            ViewMode::SideBySide => match self.side_rows.get(self.scroll)? {
+                SideRow::Header(h) => first_line_no(&fd.hunks[*h]),
+                SideRow::Pair { left, right } => right
+                    .and_then(|(h, l)| fd.hunks[h].lines[l].new_no)
+                    .or_else(|| left.and_then(|(h, l)| fd.hunks[h].lines[l].old_no)),
+            },
+        }
     }
 
     // ── selection ────────────────────────────────────────────────────────
@@ -717,6 +776,7 @@ impl App {
             (KeyCode::Char('r'), _) => self.mark_reviewed(),
             (KeyCode::Char('u'), _) => self.unmark_reviewed(),
             (KeyCode::Char('y'), _) => self.copy_reference(),
+            (KeyCode::Char('e'), _) => self.open_in_editor(),
             (KeyCode::Char(']'), _) => self.next_file(),
             (KeyCode::Char('['), _) => self.prev_file(),
             (KeyCode::Char('g'), _) => {
@@ -735,6 +795,15 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The first meaningful line number of a hunk: the first line carrying a
+/// new-file number, else the first old-file number, else `None`.
+fn first_line_no(hunk: &Hunk) -> Option<u32> {
+    hunk.lines
+        .iter()
+        .find_map(|l| l.new_no)
+        .or_else(|| hunk.lines.iter().find_map(|l| l.old_no))
 }
 
 /// Transform a parsed diff into side-by-side rows. Within each hunk, context
@@ -895,6 +964,36 @@ mod tests {
             }
             _ => panic!("expected a Pair row"),
         }
+    }
+
+    #[test]
+    fn e_requests_editor_at_top_visible_line() {
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        let mut a = app(vec![file("src/foo.rs")]);
+        a.tree_cursor = a.cursor_for_path(Path::new("src/foo.rs")).unwrap();
+        let raw = concat!("@@ -10,2 +20,2 @@\n", " ctx\n", "-old\n", "+new\n");
+        a.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("src/foo.rs")));
+
+        a.on_key(key('e'));
+        let req = a.take_editor_request().expect("expected an editor request");
+        assert_eq!(req.path, PathBuf::from("src/foo.rs"));
+        // Top of the viewport is the hunk header → first new-file line is 20.
+        assert_eq!(req.line, 20);
+    }
+
+    #[test]
+    fn e_refuses_to_open_a_deleted_file() {
+        let mut a = app(vec![ChangedFile::new(
+            PathBuf::from("gone.rs"),
+            ChangeKind::Deleted,
+        )]);
+        a.tree_cursor = a.cursor_for_path(Path::new("gone.rs")).unwrap();
+
+        a.on_key(key('e'));
+        assert!(a.take_editor_request().is_none());
+        assert!(a.error.is_some());
     }
 
     #[test]

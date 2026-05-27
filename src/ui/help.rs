@@ -16,6 +16,7 @@ const KEYS: &[(&str, &str)] = &[
     ("Enter", "expand-collapse folder / focus diff"),
     ("r / u", "mark / unmark reviewed"),
     ("y", "copy AI reference for the hunk"),
+    ("e", "open file in $EDITOR at the line"),
     ("/", "filter files (Esc to clear)"),
     ("?", "toggle this help"),
     ("q", "quit"),

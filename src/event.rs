@@ -1,39 +1,26 @@
-//! Event bus. The UI thread blocks on a single channel; producer threads feed
-//! it: the terminal input reader (always), the filesystem watcher (`Fs`), and
-//! the git worker (`Refreshed` / `Error`). The UI thread never touches git or
-//! the filesystem directly, so it stays responsive under large repos.
+//! Background event bus. Producer threads — the filesystem watcher (`Fs`) and
+//! the git worker (`Refreshed` / `Error`) — feed a channel that the UI thread
+//! drains. Terminal input is read directly on the UI thread (see
+//! `main::run`) rather than on a thread, so that shelling out to `$EDITOR` can
+//! take exclusive control of the terminal without a second reader competing for
+//! keystrokes.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::thread;
 
 use crossbeam_channel::{Sender, unbounded};
-use ratatui::crossterm::event::{self, Event as CtEvent};
 
 use crate::git::{self, diff::DiffBase};
 use crate::model::snapshot::GitSnapshot;
 
 pub enum Event {
-    /// A terminal event (key / mouse / resize).
-    Input(CtEvent),
     /// A debounced burst of filesystem changes occurred — trigger a refresh.
     Fs,
     /// A freshly computed snapshot of the repo's changed files.
     Refreshed(GitSnapshot),
     /// A background error to surface in the status bar.
     Error(String),
-}
-
-/// Spawn a thread that forwards terminal events onto the bus. It exits when
-/// `event::read()` errors or the receiver is dropped.
-pub fn spawn_input(tx: Sender<Event>) {
-    thread::spawn(move || {
-        while let Ok(ev) = event::read() {
-            if tx.send(Event::Input(ev)).is_err() {
-                break;
-            }
-        }
-    });
 }
 
 /// Spawn the git worker. It owns all blocking git work: on each request it

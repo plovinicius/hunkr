@@ -47,12 +47,15 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `Enter`   | expand-collapse folder / focus diff      |
 | `r` / `u` | mark / unmark reviewed                   |
 | `y`       | copy AI reference for the hunk           |
+| `e`       | open the file in `$EDITOR` at the line   |
 | `/`       | filter files (`Esc` clears)              |
 | `?`       | help overlay                             |
 | `q`       | quit                                     |
 
 Reviewed state persists in `.git/hunkr/review.json` (per repo/worktree, never tracked).
-Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH.
+Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH. `e` opens
+`$VISUAL`/`$EDITOR` (falling back to `vi`), jumping to the line for editors that accept
+`+LINE` (vi/vim/nvim/nano/emacs/kak); the diff refreshes automatically when you save.
 
 ## Docs
 
