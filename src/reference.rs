@@ -1,9 +1,12 @@
 //! AI reference generation + clipboard copy.
 //!
-//! Builds an AI-ready prompt for the hunk under the cursor and copies it to the
-//! clipboard so it can be pasted straight back to a coding agent. Copy prefers
-//! the system clipboard (`arboard`, reliable locally) and falls back to an
-//! OSC 52 terminal escape so it still works over tmux/SSH.
+//! Builds a compact `path:line` reference for the hunk under the cursor and
+//! copies it to the clipboard, so it can be pasted straight back to a coding
+//! agent that resolves it against the working tree. We deliberately omit the
+//! diff snippet: an agent with repo access reads the live file at those lines,
+//! which is cheaper than shipping the hunk and immune to a stale snippet. Copy
+//! prefers the system clipboard (`arboard`, reliable locally) and falls back to
+//! an OSC 52 terminal escape so it still works over tmux/SSH.
 
 use std::io::Write;
 
@@ -11,32 +14,17 @@ use anyhow::{Context, Result};
 
 use crate::model::diff::{FileDiff, Hunk};
 
-/// Build the AI-ready reference text for hunk `hunk_index` of `fd`.
+/// Build the AI-ready reference for hunk `hunk_index` of `fd`: a compact
+/// `path:start-end` pointer (collapsed to `path:line` when the hunk touches a
+/// single line) that an agent resolves against the working tree.
 pub fn build_hunk_reference(fd: &FileDiff, hunk_index: usize) -> String {
-    let hunk = &fd.hunks[hunk_index];
-    let (start, end) = new_line_range(hunk);
-    let snippet = raw_hunk_text(fd, hunk);
-
-    format!(
-        "Please adjust this change:\n\n\
-         File: {file}\n\
-         Change: #{n} (hunk {n} of {total})\n\
-         Lines: {start}-{end}\n\n\
-         ```diff\n{snippet}\n```\n\n\
-         Issue:\n",
-        file = fd.path.display(),
-        n = hunk_index + 1,
-        total = fd.hunks.len(),
-        snippet = snippet.trim_end_matches('\n'),
-    )
-}
-
-/// The contiguous raw diff text of a hunk: its `@@` header through the last
-/// body line, exactly as git emitted it (markers included).
-fn raw_hunk_text<'a>(fd: &'a FileDiff, hunk: &Hunk) -> &'a str {
-    let start = hunk.header.start;
-    let end = hunk.lines.last().map_or(hunk.header.end, |l| l.text.end);
-    &fd.text[start..end]
+    let (start, end) = new_line_range(&fd.hunks[hunk_index]);
+    let path = fd.path.display();
+    if start == end {
+        format!("{path}:{start}")
+    } else {
+        format!("{path}:{start}-{end}")
+    }
 }
 
 /// The new-file line range the hunk touches (falls back to old-file numbers for
@@ -126,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_has_file_change_lines_and_snippet() {
+    fn reference_is_path_and_line_range() {
         let raw = concat!(
             "@@ -10,3 +10,4 @@ fn main()\n",
             " keep\n",
@@ -134,15 +122,14 @@ mod tests {
             "+new\n",
             "+extra\n",
         );
-        let r = build_hunk_reference(&diff(raw), 0);
-        assert!(r.contains("File: src/foo.rs"), "{r}");
-        assert!(r.contains("Change: #1 (hunk 1 of 1)"), "{r}");
         // New-file line numbers present are 10 (keep), 11 (new), 12 (extra).
-        assert!(r.contains("Lines: 10-12"), "{r}");
-        assert!(r.contains("```diff"), "{r}");
-        assert!(r.contains("@@ -10,3 +10,4 @@"), "{r}");
-        assert!(r.contains("+extra"), "{r}");
-        assert!(r.trim_end().ends_with("Issue:"), "{r}");
+        assert_eq!(build_hunk_reference(&diff(raw), 0), "src/foo.rs:10-12");
+    }
+
+    #[test]
+    fn single_line_reference_omits_the_range() {
+        let raw = concat!("@@ -5,1 +5,1 @@\n", "-before\n", "+after\n");
+        assert_eq!(build_hunk_reference(&diff(raw), 0), "src/foo.rs:5");
     }
 
     #[test]
