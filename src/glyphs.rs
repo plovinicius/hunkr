@@ -38,13 +38,16 @@ impl Glyphs {
 
     pub fn unicode() -> Self {
         Glyphs {
+            // Note: every glyph here must be single-width in common fonts, or it
+            // will swallow the following space and misalign the row. `↻`/`⚠` are
+            // frequently rendered double-width, so we avoid them.
             reviewed: "✓",
             unreviewed: "●",
-            changed: "↻",
+            changed: "!",
             folder_open: '▾',
             folder_closed: '▸',
-            error: "⚠",
-            cursor: '█',
+            error: "!",
+            cursor: '│',
             sep: " · ",
             dash: "—",
         }

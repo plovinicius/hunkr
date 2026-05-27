@@ -178,9 +178,11 @@ coarse-resolution mtime; deleted files (no stat) are simply never cached.
 All non-text markers (review status, folder arrows, error prefix, filter cursor, status-bar
 separators) come from one `Glyphs` set in `src/glyphs.rs`. The default is **ASCII-safe**
 (`[x]`/`[ ]`/`[!]`, `>`/`v`) so it renders in any terminal/font/tmux; `--unicode` swaps in
-`✓ ● ↻ ▸ ▾`. The status bar measures text width (`unicode-width`) and only draws the
-right-aligned key hints when they fit, so they never clobber the left-side counts on a
-narrow terminal.
+`✓ ● ▸ ▾`. Every Unicode glyph in that set is chosen to be single-width in common fonts —
+ones frequently rendered double-width (`↻`, `⚠`) are avoided, since a wide glyph swallows
+the following space and misaligns the row. The status bar measures text width
+(`unicode-width`) and only draws the right-aligned key hints when they fit, so they never
+clobber the left-side counts on a narrow terminal.
 
 ## Filtering & help
 
