@@ -7,15 +7,20 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::cache::DiffCache;
 use crate::git::{self, diff::DiffBase};
 use crate::model::review::{self, ReviewStatus};
 use crate::model::{diff::FileDiff, file::ChangedFile, snapshot::GitSnapshot, tree::FileTree};
 use crate::persist::ReviewStore;
 use crate::render::viewport;
+
+/// Max parsed diffs kept hydrated in the LRU cache.
+const DIFF_CACHE_CAP: usize = 128;
 
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -28,6 +33,17 @@ fn unix_now() -> i64 {
 pub enum Focus {
     Tree,
     Diff,
+}
+
+/// Top-level input mode. Determines how keys are interpreted and which
+/// overlays are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    /// Editing the file filter query.
+    Filter,
+    /// Help overlay is open.
+    Help,
 }
 
 /// One rendered row of the diff panel: either a hunk header or a body line.
@@ -47,14 +63,17 @@ pub struct App {
     /// Index into `tree.visible`.
     pub tree_cursor: usize,
 
-    /// Hydrated diff for the currently selected file (if any).
-    pub diff: Option<FileDiff>,
+    /// Hydrated diff for the currently selected file (if any). `Arc` so the
+    /// cache and the app can share one parsed copy cheaply.
+    pub diff: Option<Arc<FileDiff>>,
     /// Flattened render rows for `diff`.
     pub diff_rows: Vec<RowRef>,
     /// Row index where each hunk's header sits (parallel to `diff.hunks`).
     pub hunk_starts: Vec<usize>,
     /// Which file index `diff` belongs to, to avoid redundant reloads.
     pub diff_file: Option<usize>,
+    /// LRU cache of parsed diffs, keyed by file signature.
+    cache: DiffCache,
 
     pub scroll: usize,
     pub current_hunk: usize,
@@ -66,6 +85,9 @@ pub struct App {
     pub hashes: HashMap<PathBuf, u64>,
 
     pub focus: Focus,
+    pub mode: Mode,
+    /// Active file-filter query (empty = no filter).
+    pub filter: String,
     pub should_quit: bool,
     pub dirty: bool,
 
@@ -114,11 +136,14 @@ impl App {
             diff_rows: Vec::new(),
             hunk_starts: Vec::new(),
             diff_file: None,
+            cache: DiffCache::new(DIFF_CACHE_CAP),
             scroll: 0,
             current_hunk: 0,
             review,
             hashes: HashMap::new(),
             focus: Focus::Tree,
+            mode: Mode::Normal,
+            filter: String::new(),
             should_quit: false,
             dirty: true,
             diff_height: 0,
@@ -253,9 +278,9 @@ impl App {
         self.hashes = snapshot.hashes;
         self.apply_files(snapshot.files, prev_path.as_deref());
 
-        // Force a reload of the (possibly new) selected file's diff.
+        // Force a fresh reload (bypassing the cache) of the selected file's diff.
         self.diff_file = None;
-        self.ensure_diff_loaded();
+        self.load_diff(false);
 
         // Restore the view if we're on the same file and its diff is identical.
         let same_path = matches!(
@@ -279,51 +304,117 @@ impl App {
     fn apply_files(&mut self, files: Vec<ChangedFile>, keep_path: Option<&Path>) {
         self.files = files;
         self.tree = FileTree::build(&self.files);
+        self.recompute_view();
         self.tree_cursor = keep_path
             .and_then(|p| self.cursor_for_path(p))
             .or_else(|| self.first_file_cursor())
             .unwrap_or(0);
     }
 
-    /// Load (or reuse) the diff for the file under the cursor.
+    // ── filtering ──────────────────────────────────────────────────────────
+
+    pub fn is_filtering(&self) -> bool {
+        !self.filter.is_empty()
+    }
+
+    /// Recompute the tree's visible list. With an active filter, the tree
+    /// collapses to a flat list of files whose path matches (case-insensitive);
+    /// otherwise it's the normal hierarchical view.
+    fn recompute_view(&mut self) {
+        if self.filter.is_empty() {
+            self.tree.recompute_visible();
+        } else {
+            let q = self.filter.to_lowercase();
+            self.tree.visible = self
+                .tree
+                .nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, node)| {
+                    let fi = node.file?;
+                    self.files[fi]
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&q)
+                        .then_some(idx)
+                })
+                .collect();
+        }
+        if self.tree_cursor >= self.tree.visible.len() {
+            self.tree_cursor = self.tree.visible.len().saturating_sub(1);
+        }
+    }
+
+    /// Load (or reuse) the diff for the file under the cursor, consulting the
+    /// LRU cache.
     pub fn ensure_diff_loaded(&mut self) {
+        self.load_diff(true);
+    }
+
+    /// Load the selected file's diff. `use_cache` is false on hot-reload so a
+    /// fresh-on-disk change can't be masked by a stale (mtime, size) signature.
+    fn load_diff(&mut self, use_cache: bool) {
         let Some(fi) = self.current_file_index() else {
-            self.diff = None;
-            self.diff_rows.clear();
-            self.hunk_starts.clear();
+            self.clear_diff();
             self.diff_file = None;
             return;
         };
         if self.diff_file == Some(fi) {
             return;
         }
+        let path = self.files[fi].path.clone();
+        let sig = crate::cache::file_signature(&self.repo_root, &path);
+
+        if use_cache
+            && let Some(sig) = sig
+            && let Some(diff) = self.cache.get(&path, sig)
+        {
+            self.adopt_diff(fi, diff);
+            return;
+        }
+
         match git::diff::fetch_file_diff(&self.repo_root, self.base, &self.files[fi]) {
             Ok(fd) => {
-                self.files[fi].additions = fd.additions();
-                self.files[fi].deletions = fd.deletions();
-                self.rebuild_rows(&fd);
-                self.diff = Some(fd);
-                self.diff_file = Some(fi);
-                self.scroll = 0;
-                self.current_hunk = 0;
-                self.error = None;
+                let diff = Arc::new(fd);
+                if let Some(sig) = sig {
+                    self.cache.put(path, sig, diff.clone());
+                }
+                self.adopt_diff(fi, diff);
             }
             Err(e) => {
                 self.error = Some(format!("diff failed: {e}"));
-                self.diff = None;
-                self.diff_rows.clear();
-                self.hunk_starts.clear();
+                self.clear_diff();
                 self.diff_file = Some(fi);
             }
         }
+    }
+
+    /// Install a (freshly loaded or cached) diff as the current one.
+    fn adopt_diff(&mut self, fi: usize, diff: Arc<FileDiff>) {
+        self.files[fi].additions = diff.additions();
+        self.files[fi].deletions = diff.deletions();
+        self.rebuild_rows(&diff);
+        self.diff = Some(diff);
+        self.diff_file = Some(fi);
+        self.scroll = 0;
+        self.current_hunk = 0;
+        self.error = None;
+    }
+
+    fn clear_diff(&mut self) {
+        self.diff = None;
+        self.diff_rows.clear();
+        self.hunk_starts.clear();
     }
 
     /// Inject an already-parsed diff (rendering tests use this to exercise the
     /// diff panel without shelling out to git).
     #[cfg(test)]
     pub(crate) fn set_diff_for_test(&mut self, fd: FileDiff) {
-        self.rebuild_rows(&fd);
-        self.diff = Some(fd);
+        let diff = Arc::new(fd);
+        self.rebuild_rows(&diff);
+        self.diff = Some(diff);
         self.diff_file = Some(0);
         self.focus = Focus::Diff;
     }
@@ -464,11 +555,71 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        self.status_msg = None;
+        match self.mode {
+            Mode::Help => self.on_key_help(key),
+            Mode::Filter => self.on_key_filter(key),
+            Mode::Normal => self.on_key_normal(key),
+        }
+    }
 
+    /// In the help overlay, any key closes it.
+    fn on_key_help(&mut self, _key: KeyEvent) {
+        self.mode = Mode::Normal;
+        self.dirty = true;
+    }
+
+    /// Editing the filter query.
+    fn on_key_filter(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.recompute_view();
+                self.tree_cursor = 0;
+                self.ensure_diff_loaded();
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => self.mode = Mode::Normal, // keep the filter applied
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.refilter();
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.refilter();
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Re-apply the filter after an edit: rebuild the view, jump to the first
+    /// match, and load its diff.
+    fn refilter(&mut self) {
+        self.recompute_view();
+        self.tree_cursor = 0;
+        self.ensure_diff_loaded();
+    }
+
+    fn on_key_normal(&mut self, key: KeyEvent) {
+        self.status_msg = None;
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) => self.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Char('?'), _) => {
+                self.mode = Mode::Help;
+                self.dirty = true;
+            }
+            (KeyCode::Char('/'), _) => {
+                self.mode = Mode::Filter;
+                self.dirty = true;
+            }
+            (KeyCode::Esc, _) if self.is_filtering() => {
+                self.filter.clear();
+                self.recompute_view();
+                self.tree_cursor = 0;
+                self.ensure_diff_loaded();
+                self.dirty = true;
+            }
             (KeyCode::Tab, _) => {
                 self.focus = match self.focus {
                     Focus::Tree => Focus::Diff,
@@ -547,5 +698,50 @@ mod tests {
 
         let cur = a.current_file_index().unwrap();
         assert_eq!(a.files[cur].path, PathBuf::from("a.rs"));
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn filter_narrows_to_matching_files_and_esc_clears() {
+        let mut a = app(vec![
+            file("src/foo.rs"),
+            file("src/bar.rs"),
+            file("README.md"),
+        ]);
+
+        a.on_key(key('/')); // enter filter mode
+        assert_eq!(a.mode, Mode::Filter);
+        a.on_key(key('b')); // query "b" → only src/bar.rs matches
+        a.on_key(key('a'));
+        a.on_key(key('r'));
+
+        let visible_files: Vec<_> = a
+            .tree
+            .visible
+            .iter()
+            .filter_map(|&n| a.tree.nodes[n].file)
+            .map(|fi| a.files[fi].path.clone())
+            .collect();
+        assert_eq!(visible_files, vec![PathBuf::from("src/bar.rs")]);
+
+        // Esc cancels the filter and restores the full hierarchical view.
+        a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(!a.is_filtering());
+        assert!(a.tree.visible.len() > 1);
+    }
+
+    #[test]
+    fn question_mark_toggles_help_and_any_key_closes() {
+        let mut a = app(vec![file("a.rs")]);
+        a.on_key(key('?'));
+        assert_eq!(a.mode, Mode::Help);
+        // In help mode, a normally-quit key just closes the overlay.
+        a.on_key(key('q'));
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(!a.should_quit);
     }
 }

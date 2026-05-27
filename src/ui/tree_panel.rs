@@ -33,10 +33,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     // Keep the cursor row within the visible window (simple top-anchored scroll).
     let top = app.tree_cursor.saturating_sub(height.saturating_sub(1));
 
+    // When filtering, the tree is a flat list of matching files, so drop the
+    // hierarchical indent and show full paths for clarity.
+    let filtering = app.is_filtering();
     let mut lines = Vec::with_capacity(height);
     for (i, &node_idx) in app.tree.visible.iter().enumerate().skip(top).take(height) {
         let node = &app.tree.nodes[node_idx];
-        let indent = "  ".repeat(node.depth as usize);
+        let indent = if filtering {
+            String::new()
+        } else {
+            "  ".repeat(node.depth as usize)
+        };
 
         let mut spans: Vec<Span> = vec![Span::raw(indent)];
         if let Some(fi) = node.file {
@@ -46,7 +53,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 format!("{} ", status.glyph()),
                 Style::default().fg(status_color(status)),
             ));
-            spans.push(Span::raw(node.name.clone()));
+            let name = if filtering {
+                file.path.to_string_lossy().into_owned()
+            } else {
+                node.name.clone()
+            };
+            spans.push(Span::raw(name));
             if let Some(suffix) = kind_suffix(&file.kind) {
                 spans.push(Span::styled(suffix, dim));
             }

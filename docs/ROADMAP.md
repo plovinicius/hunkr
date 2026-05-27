@@ -41,8 +41,15 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
     `diff` snippet / `Issue:` slot) — `src/reference.rs`
   - copies via `arboard`, falling back to an OSC 52 escape (built-in base64) for tmux/SSH;
     status bar reports which path was used
-- ⬜ **M6 — Polish**: `/` file filter, `?` help overlay, diff cache + bounded hydration,
-  richer error flashes.
+- ✅ **M6 — Polish**
+  - `/` file filter (flat, case-insensitive, full paths; Esc clears) with a live
+    status-bar prompt
+  - `?` help overlay listing keybindings (any key closes)
+  - LRU diff cache (`src/cache.rs`) keyed by `(mtime, size)` so re-selecting a file is
+    instant; hot-reload bypasses the cache to avoid stale reads
+
+**🎉 MVP complete** — the full review loop works: tree → virtualized diff → hot reload →
+reviewed state → AI reference copy, with file filter and help.
 
 ## Later (not MVP)
 

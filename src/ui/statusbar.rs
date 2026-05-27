@@ -5,15 +5,19 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 
-use crate::app::App;
+use crate::app::{App, Mode};
 use crate::model::review::ReviewStatus;
 
-const HINTS: &str = " j/k move · n/p hunk · r review · y copy · ]/[ file · q quit ";
+const HINTS: &str = " j/k move · n/p hunk · r review · y copy · / filter · ? help · q quit ";
+const FILTER_HINTS: &str = " Enter apply · Esc cancel ";
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let bar = Style::default().bg(Color::Indexed(236)).fg(Color::Gray);
 
-    let left = if let Some(err) = &app.error {
+    let left = if app.mode == Mode::Filter {
+        // Live filter editing, with a block cursor.
+        format!(" filter: {}\u{2588}", app.filter)
+    } else if let Some(err) = &app.error {
         format!(" ⚠ {err}")
     } else if let Some(msg) = &app.status_msg {
         format!(" {msg}")
@@ -32,7 +36,18 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             }
             _ => "—".to_string(),
         };
-        format!(" hunkr · ✓{reviewed} ●{unreviewed} ↻{changed} · {hunk}")
+        let filter = if app.is_filtering() {
+            format!(" · filter:{}", app.filter)
+        } else {
+            String::new()
+        };
+        format!(" hunkr · ✓{reviewed} ●{unreviewed} ↻{changed} · {hunk}{filter}")
+    };
+
+    let hints = if app.mode == Mode::Filter {
+        FILTER_HINTS
+    } else {
+        HINTS
     };
 
     // Background first, then the two text layers (left text is drawn first so
@@ -40,7 +55,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new("").style(bar), area);
     f.render_widget(Paragraph::new(left).style(bar), area);
     f.render_widget(
-        Paragraph::new(HINTS).style(bar).alignment(Alignment::Right),
+        Paragraph::new(hints).style(bar).alignment(Alignment::Right),
         area,
     );
 }

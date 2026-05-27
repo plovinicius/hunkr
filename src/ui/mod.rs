@@ -3,13 +3,14 @@
 //! scrolling correctly.
 
 mod diff_panel;
+mod help;
 mod statusbar;
 mod tree_panel;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
-use crate::app::App;
+use crate::app::{App, Mode};
 
 /// Width of the file-tree panel, in columns.
 const TREE_WIDTH: u16 = 44;
@@ -32,6 +33,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     tree_panel::render(f, tree_area, app);
     diff_panel::render(f, diff_area, app);
     statusbar::render(f, status, app);
+
+    if app.mode == Mode::Help {
+        help::render(f, area);
+    }
 }
 
 #[cfg(test)]
@@ -128,5 +133,29 @@ mod tests {
         // Diff panel title shows the file path; status bar shows hunk position.
         assert!(text.contains("foo.rs"), "diff title missing:\n{text}");
         assert!(text.contains("hunk 1/1"), "hunk counter missing:\n{text}");
+    }
+
+    #[test]
+    fn help_overlay_lists_keybindings() {
+        let files = vec![ChangedFile::new(
+            PathBuf::from("a.rs"),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        app.mode = Mode::Help;
+
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(text.contains("Help"), "help title missing:\n{text}");
+        assert!(
+            text.contains("copy AI reference"),
+            "keybinding missing:\n{text}"
+        );
+        assert!(
+            text.contains("press any key to close"),
+            "help footer missing:\n{text}"
+        );
     }
 }

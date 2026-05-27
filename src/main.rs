@@ -6,6 +6,7 @@
 //! app sits at zero CPU while idle.
 
 mod app;
+mod cache;
 mod cli;
 mod event;
 mod git;

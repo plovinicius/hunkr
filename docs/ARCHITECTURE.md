@@ -164,10 +164,22 @@ over tmux/SSH where there's no local display. The status bar reports which path 
 The line range is derived from the hunk's actual line numbers; the snippet is sliced
 byte-for-byte from the backing diff text.
 
-## Caching _(planned: M6)_
+## Caching
 
-Parsed diffs cached by `(path, mtime, size)` so refresh is O(changed files); bounded
-hydration (LRU) keeps memory flat on huge repos.
+`src/cache.rs` is a bounded **LRU cache** of parsed `Arc<FileDiff>`, keyed by `(mtime,
+size)` of the working-tree file. Re-selecting a file you've already viewed reuses the
+parsed diff (an `Arc` clone) instead of shelling out to git — navigation is instant and
+memory stays flat (cap `DIFF_CACHE_CAP`). Hot-reload deliberately **bypasses** the cache
+(`load_diff(use_cache=false)`) so a fresh-on-disk change can never be masked by a
+coarse-resolution mtime; deleted files (no stat) are simply never cached.
+
+## Filtering & help
+
+`/` enters filter mode: the tree collapses to a flat, case-insensitive list of files whose
+path matches (shown with full paths), with a live prompt in the status bar; Enter keeps the
+filter, Esc clears it. `?` opens a centered help overlay (`ui/help.rs`) that any key
+closes. Both are driven by `App::mode` (`Normal` / `Filter` / `Help`), which `on_key`
+dispatches on.
 
 ---
 
