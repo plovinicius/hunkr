@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 use crate::cache::DiffCache;
 use crate::git::{self, diff::DiffBase};
@@ -27,6 +29,9 @@ use crate::render::viewport;
 
 /// Max parsed diffs kept hydrated in the LRU cache.
 const DIFF_CACHE_CAP: usize = 128;
+
+/// Rows the diff scrolls per mouse-wheel notch.
+const MOUSE_SCROLL_LINES: isize = 3;
 
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -135,6 +140,9 @@ pub struct App {
 
     /// Diff viewport height in rows, updated by the renderer each frame.
     pub diff_height: usize,
+    /// Left column (x origin) of the diff panel, updated by the renderer each
+    /// frame, so mouse-wheel events can be routed to the panel under the cursor.
+    pub diff_x: u16,
 
     pub status_msg: Option<String>,
     pub error: Option<String>,
@@ -197,6 +205,7 @@ impl App {
             should_quit: false,
             dirty: true,
             diff_height: 0,
+            diff_x: 0,
             status_msg: None,
             error: None,
             pending_editor: None,
@@ -685,6 +694,27 @@ impl App {
 
     // ── input ────────────────────────────────────────────────────────────
 
+    /// Route a mouse-wheel notch to the panel under the cursor: over the diff
+    /// it scrolls a few lines; over the tree it nudges the selection one row.
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        let down = match ev.kind {
+            MouseEventKind::ScrollDown => true,
+            MouseEventKind::ScrollUp => false,
+            _ => return,
+        };
+        if ev.column >= self.diff_x {
+            self.scroll_by(if down {
+                MOUSE_SCROLL_LINES
+            } else {
+                -MOUSE_SCROLL_LINES
+            });
+        } else if down {
+            self.cursor_down();
+        } else {
+            self.cursor_up();
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         // Ignore key-release events (Windows / kitty protocol emit them).
         if key.kind == KeyEventKind::Release {
@@ -762,6 +792,15 @@ impl App {
                 };
                 self.dirty = true;
             }
+            // Shift+arrows page the diff, aliasing PageDown/PageUp. Matched
+            // ahead of the plain-arrow arms below, whose `_` modifier would
+            // otherwise swallow the Shift variant.
+            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::PageDown, _) => {
+                self.scroll_by(self.diff_height.max(1) as isize)
+            }
+            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::PageUp, _) => {
+                self.scroll_by(-(self.diff_height.max(1) as isize))
+            }
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => match self.focus {
                 Focus::Tree => self.cursor_down(),
                 Focus::Diff => self.scroll_by(1),
@@ -789,8 +828,6 @@ impl App {
                 self.sync_hunk_from_scroll();
                 self.dirty = true;
             }
-            (KeyCode::PageDown, _) => self.scroll_by(self.diff_height.max(1) as isize),
-            (KeyCode::PageUp, _) => self.scroll_by(-(self.diff_height.max(1) as isize)),
             (KeyCode::Enter, _) => self.activate(),
             _ => {}
         }
@@ -1005,5 +1042,65 @@ mod tests {
         a.on_key(key('q'));
         assert_eq!(a.mode, Mode::Normal);
         assert!(!a.should_quit);
+    }
+
+    /// A single-file app whose diff has plenty of rows to scroll through.
+    fn scrollable_diff_app() -> App {
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        let mut a = app(vec![file("src/foo.rs")]);
+        a.tree_cursor = a.cursor_for_path(Path::new("src/foo.rs")).unwrap();
+        let mut raw = String::from("@@ -1,30 +1,30 @@\n");
+        for i in 0..30 {
+            raw.push_str(&format!(" line{i}\n"));
+        }
+        a.set_diff_for_test(parse_unified(Arc::from(raw.as_str()), PathBuf::from("src/foo.rs")));
+        a
+    }
+
+    #[test]
+    fn shift_arrows_page_the_diff() {
+        let mut a = scrollable_diff_app();
+        a.diff_height = 5;
+
+        a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(a.scroll, 5, "Shift+Down should page down by the viewport height");
+
+        a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(a.scroll, 0, "Shift+Up should page back to the top");
+    }
+
+    fn wheel(kind: MouseEventKind, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_over_diff_scrolls_it() {
+        let mut a = scrollable_diff_app();
+        a.diff_height = 5;
+        a.diff_x = 44;
+
+        a.on_mouse(wheel(MouseEventKind::ScrollDown, 60));
+        assert_eq!(a.scroll, MOUSE_SCROLL_LINES as usize);
+
+        a.on_mouse(wheel(MouseEventKind::ScrollUp, 60));
+        assert_eq!(a.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_over_tree_leaves_diff_unscrolled() {
+        let mut a = scrollable_diff_app();
+        a.diff_height = 5;
+        a.diff_x = 44;
+
+        // A wheel notch left of the diff's edge targets the tree, not the diff.
+        a.on_mouse(wheel(MouseEventKind::ScrollUp, 5));
+        assert_eq!(a.scroll, 0, "tree-side wheel must not scroll the diff");
     }
 }

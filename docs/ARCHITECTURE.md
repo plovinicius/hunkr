@@ -40,7 +40,7 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 main.rs          entry: CLI parse → repo discover → App::new → terminal guard → run loop
 cli.rs           clap args (optional repo path)
 event.rs         background Event enum + git-worker thread feeding the channel
-terminal.rs      raw mode + alternate screen + panic-hook restore
+terminal.rs      raw mode + alternate screen + mouse capture + panic-hook restore
 app.rs           App state (single source of truth) + update/navigation/input
 git/
   command.rs     spawn `git` (capture / capture_diff / succeeds)
@@ -107,7 +107,8 @@ The diff panel computes `viewport::visible_range(scroll, height, total)` and ren
 those `diff_rows` into `Line`s each frame. Headers render bold cyan; lines render with an
 `old new ± ` gutter, green/red/gray by kind, with tab expansion (`unicode-width`).
 Panel heights are written back into `App` during render so scroll clamping and PageUp/Down
-know the page size.
+(and Shift+arrows, which alias them) know the page size; the diff panel's left column
+(`diff_x`) is recorded too so mouse-wheel events route to the panel under the cursor.
 
 Verified by in-memory `TestBackend` render tests in `ui/mod.rs`.
 

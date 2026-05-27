@@ -27,8 +27,10 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let diff_area = cols[1];
 
     // Record the diff viewport height (inner area minus the 2 border rows) so
-    // scroll clamping and PageUp/Down know how far a page is.
+    // scroll clamping and PageUp/Down know how far a page is, and its left edge
+    // so mouse-wheel events can be routed to the panel under the cursor.
     app.diff_height = diff_area.height.saturating_sub(2) as usize;
+    app.diff_x = diff_area.x;
 
     tree_panel::render(f, tree_area, app);
     diff_panel::render(f, diff_area, app);

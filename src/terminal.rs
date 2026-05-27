@@ -6,6 +6,7 @@ use std::io::{self, Stdout};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -13,17 +14,20 @@ use ratatui::crossterm::terminal::{
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-/// Enter raw mode + the alternate screen and build the ratatui terminal.
+/// Enter raw mode + the alternate screen and build the ratatui terminal. Mouse
+/// capture is enabled so the wheel can scroll the diff; the cost is that
+/// click-drag text selection is intercepted (hold Shift/Option to bypass it in
+/// most terminals).
 pub fn init() -> io::Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 /// Leave the alternate screen and disable raw mode. Safe to call more than once.
 pub fn restore() -> io::Result<()> {
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()
 }
 

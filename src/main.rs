@@ -114,6 +114,7 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
 fn handle_terminal_event(app: &mut App, ev: CtEvent) {
     match ev {
         CtEvent::Key(key) => app.on_key(key),
+        CtEvent::Mouse(m) => app.on_mouse(m),
         CtEvent::Resize(_, _) => app.dirty = true,
         _ => {}
     }

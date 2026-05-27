@@ -38,7 +38,9 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 
 | Key       | Action                                   |
 |-----------|------------------------------------------|
-| `j` / `k` | move cursor / scroll diff                |
+| `j` / `k` / arrows | move cursor / scroll diff       |
+| `Shift`+arrows / `PgUp` / `PgDn` | page up / down   |
+| mouse wheel | scroll diff (or move cursor over the tree) |
 | `n` / `p` | next / previous hunk                     |
 | `]` / `[` | next / previous file                     |
 | `s`       | toggle unified / side-by-side diff       |

@@ -7,7 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 const KEYS: &[(&str, &str)] = &[
-    ("j / k", "move cursor / scroll diff"),
+    ("j / k / arrows", "move cursor / scroll diff"),
+    ("Shift+arrows", "page up / down (also PgUp/PgDn)"),
+    ("mouse wheel", "scroll diff / move cursor"),
     ("n / p", "next / previous hunk"),
     ("] / [", "next / previous file"),
     ("s", "toggle unified / side-by-side"),
