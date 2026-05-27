@@ -8,6 +8,7 @@ ahash = "0.8"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+notify = "8.2.0"
 ratatui = "0.29"
 thiserror = "2"
 unicode-width = "0.2"

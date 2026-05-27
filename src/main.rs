@@ -13,6 +13,7 @@ mod model;
 mod render;
 mod terminal;
 mod ui;
+mod watch;
 
 use anyhow::Result;
 use clap::Parser;
@@ -40,7 +41,14 @@ fn main() -> Result<()> {
 
 fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
     let (tx, rx) = unbounded::<Event>();
-    event::spawn_input(tx);
+    event::spawn_input(tx.clone());
+
+    // Off-thread git worker + filesystem watcher for hot reload. If watching
+    // can't start, the app still works — it just won't auto-refresh.
+    let git_req = event::spawn_git_worker(app.repo_root.clone(), tx.clone());
+    if let Err(e) = watch::spawn(app.repo_root.clone(), tx.clone()) {
+        app.error = Some(format!("watch disabled: {e}"));
+    }
 
     while !app.should_quit {
         if app.dirty {
@@ -50,6 +58,15 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
         // Block until something happens — zero idle CPU.
         match rx.recv() {
             Ok(Event::Input(ev)) => handle_terminal_event(app, ev),
+            Ok(Event::Fs) => {
+                // A change landed; ask the worker to recompute off-thread.
+                let _ = git_req.send(());
+            }
+            Ok(Event::Refreshed(snapshot)) => app.reconcile(snapshot),
+            Ok(Event::Error(msg)) => {
+                app.error = Some(msg);
+                app.dirty = true;
+            }
             Err(_) => break, // all senders dropped
         }
     }

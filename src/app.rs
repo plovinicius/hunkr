@@ -5,12 +5,12 @@
 //! Phase-A slice the diff is loaded synchronously on selection (lazy, per file);
 //! M3 will move git work onto a background worker thread that feeds events.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::git::{self, diff::DiffBase};
-use crate::model::{diff::FileDiff, file::ChangedFile, tree::FileTree};
+use crate::model::{diff::FileDiff, file::ChangedFile, snapshot::GitSnapshot, tree::FileTree};
 use crate::render::viewport;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,13 +107,72 @@ impl App {
     }
 
     fn select_first_file(&mut self) {
-        for (i, &node) in self.tree.visible.iter().enumerate() {
-            if self.tree.nodes[node].file.is_some() {
-                self.tree_cursor = i;
-                return;
-            }
+        self.tree_cursor = self.first_file_cursor().unwrap_or(0);
+    }
+
+    /// Visible-list index of the first file leaf, if any.
+    fn first_file_cursor(&self) -> Option<usize> {
+        self.tree
+            .visible
+            .iter()
+            .position(|&n| self.tree.nodes[n].file.is_some())
+    }
+
+    /// Visible-list index of the node holding `path`, if currently visible.
+    fn cursor_for_path(&self, path: &Path) -> Option<usize> {
+        self.tree.visible.iter().position(|&n| {
+            self.tree.nodes[n]
+                .file
+                .is_some_and(|fi| self.files[fi].path == *path)
+        })
+    }
+
+    // ── hot reload ─────────────────────────────────────────────────────────
+
+    /// Apply a freshly computed snapshot, preserving as much of the user's
+    /// place as possible: the selection stays on the same path (or snaps to the
+    /// nearest file), and if the selected file's diff is byte-for-byte
+    /// unchanged we keep the exact scroll position and current hunk.
+    pub fn reconcile(&mut self, snapshot: GitSnapshot) {
+        let prev_path = self
+            .current_file_index()
+            .map(|i| self.files[i].path.clone());
+        let prev_text = self.diff.as_ref().map(|d| d.text.clone());
+        let prev_scroll = self.scroll;
+        let prev_hunk = self.current_hunk;
+
+        self.apply_files(snapshot.files, prev_path.as_deref());
+
+        // Force a reload of the (possibly new) selected file's diff.
+        self.diff_file = None;
+        self.ensure_diff_loaded();
+
+        // Restore the view if we're on the same file and its diff is identical.
+        let same_path = matches!(
+            (&prev_path, self.current_file_index()),
+            (Some(p), Some(i)) if *p == self.files[i].path
+        );
+        if same_path
+            && let (Some(prev), Some(cur)) = (&prev_text, &self.diff)
+            && prev.as_ref() == cur.text.as_ref()
+        {
+            self.scroll =
+                viewport::clamp_offset(prev_scroll, self.diff_height.max(1), self.diff_rows.len());
+            self.current_hunk = prev_hunk.min(self.hunk_starts.len().saturating_sub(1));
         }
-        self.tree_cursor = 0;
+        self.dirty = true;
+    }
+
+    /// Rebuild the file list + tree and restore the cursor to `keep_path` (or
+    /// the first file). Pure: no git, no diff hydration — separated so it can be
+    /// unit-tested without a repository.
+    fn apply_files(&mut self, files: Vec<ChangedFile>, keep_path: Option<&Path>) {
+        self.files = files;
+        self.tree = FileTree::build(&self.files);
+        self.tree_cursor = keep_path
+            .and_then(|p| self.cursor_for_path(p))
+            .or_else(|| self.first_file_cursor())
+            .unwrap_or(0);
     }
 
     /// Load (or reuse) the diff for the file under the cursor.
@@ -334,5 +393,46 @@ impl App {
             (KeyCode::Enter, _) => self.activate(),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::file::ChangeKind;
+
+    fn file(p: &str) -> ChangedFile {
+        ChangedFile::new(PathBuf::from(p), ChangeKind::Modified)
+    }
+
+    fn app(files: Vec<ChangedFile>) -> App {
+        App::with_files(PathBuf::from("/repo"), DiffBase::Head, files)
+    }
+
+    #[test]
+    fn apply_files_keeps_cursor_on_same_path() {
+        let mut a = app(vec![file("a.rs"), file("src/b.rs")]);
+        a.tree_cursor = a.cursor_for_path(Path::new("src/b.rs")).unwrap();
+
+        // A new file appears; the cursor should still sit on src/b.rs.
+        a.apply_files(
+            vec![file("a.rs"), file("src/b.rs"), file("src/c.rs")],
+            Some(Path::new("src/b.rs")),
+        );
+
+        let cur = a.current_file_index().unwrap();
+        assert_eq!(a.files[cur].path, PathBuf::from("src/b.rs"));
+    }
+
+    #[test]
+    fn apply_files_snaps_to_first_when_path_gone() {
+        let mut a = app(vec![file("a.rs"), file("b.rs")]);
+        a.tree_cursor = a.cursor_for_path(Path::new("b.rs")).unwrap();
+
+        // The selected file disappeared; fall back to the first file.
+        a.apply_files(vec![file("a.rs")], Some(Path::new("b.rs")));
+
+        let cur = a.current_file_index().unwrap();
+        assert_eq!(a.files[cur].path, PathBuf::from("a.rs"));
     }
 }

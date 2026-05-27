@@ -21,12 +21,15 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   - virtualized stacked rendering (visible window only)
   - `n`/`p` hunk nav, `j`/`k` + `g`/`G` + PageUp/Down scroll, `]`/`[` file nav
 
-→ **Pause point: review the UX before Phase B.**
-
 ## Phase B — full MVP
 
-- ⬜ **M3 — Hot reload**: `notify` watcher (`.git/`-filtered, debounced) + git worker thread
-  + `GitRefreshed` reconcile preserving selection / scroll / current hunk.
+- ✅ **M3 — Hot reload**
+  - `notify` recursive watcher with **`.git/` filtering** (no index/lock feedback loop)
+    and ~150ms debounce/coalesce (`src/watch.rs`)
+  - off-thread git worker (`event::spawn_git_worker`) recomputes the snapshot so the UI
+    thread never blocks on git; requests coalesce
+  - `App::reconcile` preserves selection by path and keeps exact scroll + current hunk
+    when the selected file's diff is byte-for-byte unchanged
 - ⬜ **M4 — Reviewed state**: `r`/`u`, diff-hash tie-in, `ChangedAfterReview ↻`, persisted to
   `.git/hunkr/review.json`.
 - ⬜ **M5 — AI reference copy**: `y` → prompt builder → `arboard` + OSC 52 fallback + status flash.

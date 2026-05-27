@@ -129,14 +129,19 @@ loop {
 
 ---
 
-## Hot reload _(planned: M3)_
+## Hot reload
 
-An fs-watch thread (`notify`, recursive, **filtering `.git/`** to avoid an index/lock
-feedback loop, debounced ~120ms) nudges a git-worker thread, which recomputes the snapshot
-off the UI thread and emits `GitRefreshed`. Reconcile matches files by path and preserves
-selection, scroll, and current hunk when the selected file's diff hash is unchanged;
-otherwise it re-hydrates and clamps. This off-thread design is what makes refresh feel
-instant — the UI thread never blocks on `git`.
+An fs-watch thread (`src/watch.rs`: `notify`, recursive, **filtering `.git/`** to avoid an
+index/lock feedback loop, debounced ~150ms and coalesced) posts `Event::Fs`. The UI thread
+forwards that to a git-worker thread (`event::spawn_git_worker`) which recomputes the
+changed-file snapshot off-thread and emits `Event::Refreshed`. `App::reconcile` matches
+files by path and preserves selection, scroll, and current hunk when the selected file's
+diff is byte-for-byte unchanged; otherwise it re-hydrates and clamps. This off-thread
+design is what makes refresh feel instant — the UI thread never blocks on `git`.
+
+Currently the selected file's diff is still re-hydrated synchronously on the UI thread
+during reconcile (one file, lazy); moving per-file diff fetch fully off-thread is a future
+refinement if large single-file diffs ever stutter.
 
 ## Reviewed state _(planned: M4)_
 
