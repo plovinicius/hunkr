@@ -41,10 +41,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             String::new()
         };
-        // A space after each icon (some Unicode glyphs render wide) and a wider
-        // gap between groups so the counts stay legible.
+        // Each count is its own separator-delimited segment so the groups read
+        // as evenly spaced regardless of glyph width.
         format!(
-            " hunkr{sep}{} {reviewed}  {} {unreviewed}  {} {changed}{sep}{hunk}{filter}",
+            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{} {changed}{sep}{hunk}{filter}",
             g.reviewed, g.unreviewed, g.changed,
         )
     };

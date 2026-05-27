@@ -94,7 +94,7 @@ mod tests {
         // Status bar chrome + review counts (2 unreviewed).
         assert!(text.contains("hunkr"), "status bar missing:\n{text}");
         assert!(
-            text.contains("[x] 0  [ ] 2  [!] 0"),
+            text.contains("[x] 0 | [ ] 2 | [!] 0"),
             "review counts missing:\n{text}"
         );
         assert!(text.contains("q quit"), "key hints missing:\n{text}");
