@@ -30,8 +30,12 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
     thread never blocks on git; requests coalesce
   - `App::reconcile` preserves selection by path and keeps exact scroll + current hunk
     when the selected file's diff is byte-for-byte unchanged
-- ⬜ **M4 — Reviewed state**: `r`/`u`, diff-hash tie-in, `ChangedAfterReview ↻`, persisted to
-  `.git/hunkr/review.json`.
+- ✅ **M4 — Reviewed state**
+  - `r` mark / `u` unmark; status tied to a **deterministic diff hash** (seahash) so a
+    file that changes again auto-surfaces as `↻ ChangedAfterReview`
+  - persisted to `.git/hunkr/review.json` (versioned schema), loaded on startup
+  - tree shows `✓ ● ↻` glyphs; status bar shows review counts
+  - current hashes recomputed off-thread for only the (small) reviewed set on refresh
 - ⬜ **M5 — AI reference copy**: `y` → prompt builder → `arboard` + OSC 52 fallback + status flash.
 - ⬜ **M6 — Polish**: `/` file filter, `?` help overlay, status-bar counts, diff cache +
   bounded hydration, richer error flashes.

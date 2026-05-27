@@ -5,13 +5,24 @@
 //! Phase-A slice the diff is loaded synchronously on selection (lazy, per file);
 //! M3 will move git work onto a background worker thread that feeds events.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::git::{self, diff::DiffBase};
+use crate::model::review::{self, ReviewStatus};
 use crate::model::{diff::FileDiff, file::ChangedFile, snapshot::GitSnapshot, tree::FileTree};
+use crate::persist::ReviewStore;
 use crate::render::viewport;
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -48,6 +59,12 @@ pub struct App {
     pub scroll: usize,
     pub current_hunk: usize,
 
+    /// Persisted reviewed-state, keyed by path → diff hash at review time.
+    pub review: ReviewStore,
+    /// Current diff hashes for reviewed files (to detect "changed after
+    /// review"). Maintained on mark and on each refresh.
+    pub hashes: HashMap<PathBuf, u64>,
+
     pub focus: Focus,
     pub should_quit: bool,
     pub dirty: bool,
@@ -63,17 +80,30 @@ impl App {
     pub fn new(repo_root: PathBuf) -> anyhow::Result<Self> {
         let base = git::diff::detect_base(&repo_root);
         let files = git::status::changed_files(&repo_root)?;
+        let git_dir = git::repo::git_dir(&repo_root)?;
+        let review = ReviewStore::load(&git_dir);
+        // Compute current hashes for the (typically few) reviewed files up front
+        // so their ✓/↻ status is correct on the very first paint.
+        let hashes = git::diff::diff_hashes_for(
+            &repo_root,
+            base,
+            files.iter().filter(|f| review.get(&f.path).is_some()),
+        );
+
         let mut app = Self::with_files(repo_root, base, files);
+        app.review = review;
+        app.hashes = hashes;
         app.select_first_file();
         app.ensure_diff_loaded();
         Ok(app)
     }
 
     /// Construct an app from an already-resolved file list, without touching
-    /// git. Used by [`App::new`] and by rendering tests (which inject synthetic
-    /// files so the UI can be exercised without a repository).
+    /// git. Used by [`App::new`] and by rendering/reconcile tests (which inject
+    /// synthetic files so the app can be exercised without a repository).
     pub(crate) fn with_files(repo_root: PathBuf, base: DiffBase, files: Vec<ChangedFile>) -> Self {
         let tree = FileTree::build(&files);
+        let review = ReviewStore::empty(&repo_root.join(".git"));
         App {
             repo_root,
             base,
@@ -86,6 +116,8 @@ impl App {
             diff_file: None,
             scroll: 0,
             current_hunk: 0,
+            review,
+            hashes: HashMap::new(),
             focus: Focus::Tree,
             should_quit: false,
             dirty: true,
@@ -93,6 +125,59 @@ impl App {
             status_msg: None,
             error: None,
         }
+    }
+
+    // ── reviewed state ─────────────────────────────────────────────────────
+
+    /// Derived review status for a file (by index into `files`).
+    pub fn review_status(&self, file_idx: usize) -> ReviewStatus {
+        let path = &self.files[file_idx].path;
+        review::derive(self.review.get(path), self.hashes.get(path).copied())
+    }
+
+    /// Paths that currently have a review record (asked of the git worker so it
+    /// re-hashes only those on refresh).
+    pub fn reviewed_paths(&self) -> Vec<PathBuf> {
+        self.review.reviewed_paths()
+    }
+
+    /// Diff hash of the currently hydrated file, if any.
+    fn selected_hash(&self) -> Option<u64> {
+        self.diff.as_ref().map(|d| git::diff::hash_text(&d.text))
+    }
+
+    fn mark_reviewed(&mut self) {
+        let Some(fi) = self.current_file_index() else {
+            return;
+        };
+        let path = self.files[fi].path.clone();
+        let Some(hash) = self.selected_hash() else {
+            self.error = Some("no diff to mark reviewed".into());
+            return;
+        };
+        match self.review.mark(path.clone(), hash, unix_now()) {
+            Ok(()) => {
+                self.hashes.insert(path, hash);
+                self.status_msg = Some("marked reviewed".into());
+            }
+            Err(e) => self.error = Some(format!("could not save review state: {e}")),
+        }
+        self.dirty = true;
+    }
+
+    fn unmark_reviewed(&mut self) {
+        let Some(fi) = self.current_file_index() else {
+            return;
+        };
+        let path = self.files[fi].path.clone();
+        match self.review.unmark(&path) {
+            Ok(()) => {
+                self.hashes.remove(&path);
+                self.status_msg = Some("unmarked".into());
+            }
+            Err(e) => self.error = Some(format!("could not save review state: {e}")),
+        }
+        self.dirty = true;
     }
 
     // ── selection ────────────────────────────────────────────────────────
@@ -141,6 +226,9 @@ impl App {
         let prev_scroll = self.scroll;
         let prev_hunk = self.current_hunk;
 
+        // Adopt the worker's freshly computed hashes for reviewed files; this is
+        // what flips a reviewed file to ↻ once it changes on disk.
+        self.hashes = snapshot.hashes;
         self.apply_files(snapshot.files, prev_path.as_deref());
 
         // Force a reload of the (possibly new) selected file's diff.
@@ -376,6 +464,8 @@ impl App {
             },
             (KeyCode::Char('n'), _) => self.next_hunk(),
             (KeyCode::Char('p'), _) => self.prev_hunk(),
+            (KeyCode::Char('r'), _) => self.mark_reviewed(),
+            (KeyCode::Char('u'), _) => self.unmark_reviewed(),
             (KeyCode::Char(']'), _) => self.next_file(),
             (KeyCode::Char('['), _) => self.prev_file(),
             (KeyCode::Char('g'), _) => {

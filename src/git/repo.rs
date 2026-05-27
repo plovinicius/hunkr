@@ -17,3 +17,13 @@ pub fn discover(start: &Path) -> Result<PathBuf> {
     }
     Ok(PathBuf::from(s))
 }
+
+/// The absolute git directory for `repo_root`. Uses `--absolute-git-dir` so it
+/// resolves correctly for linked worktrees (where `.git` is a file pointing
+/// elsewhere), giving a stable home for hunkr's per-repo state.
+pub fn git_dir(repo_root: &Path) -> Result<PathBuf> {
+    let out = super::command::capture(repo_root, &["rev-parse", "--absolute-git-dir"])
+        .context("could not resolve the git directory")?;
+    let s = String::from_utf8_lossy(&out).trim().to_string();
+    Ok(PathBuf::from(s))
+}

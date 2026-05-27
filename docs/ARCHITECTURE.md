@@ -143,12 +143,17 @@ Currently the selected file's diff is still re-hydrated synchronously on the UI 
 during reconcile (one file, lazy); moving per-file diff fetch fully off-thread is a future
 refinement if large single-file diffs ever stutter.
 
-## Reviewed state _(planned: M4)_
+## Reviewed state
 
-Reviewed status is tied to a **diff hash**, not a filename. Status is derived, never
-stored: no record → `Unreviewed ●`; record hash == current → `Reviewed ✓`; mismatch →
-`ChangedAfterReview ↻`. Records persist to `.git/hunkr/review.json` (inside `.git/`, so
-never tracked; per-worktree), loaded on startup and saved debounced + on exit.
+Reviewed status is tied to a **diff hash**, not a filename, and is *derived* (never
+stored): no record → `Unreviewed ●`; record hash == current → `Reviewed ✓`; mismatch →
+`ChangedAfterReview ↻` (see `model/review.rs`). The hash is **seahash** — deterministic
+across processes, so a hash persisted one session still matches the next (the default
+randomly-seeded hashers would not). `r` hashes the already-hydrated diff locally (no git
+call); on refresh the git worker recomputes hashes for only the reviewed set, which is what
+flips a changed file to `↻`. Records persist to `.git/hunkr/review.json` via `persist.rs`
+(versioned `schema`; git dir resolved with `rev-parse --absolute-git-dir` for worktree
+correctness), loaded on startup, rewritten on each change.
 
 ## AI reference copy _(planned: M5)_
 

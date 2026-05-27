@@ -78,13 +78,17 @@ mod tests {
         );
         assert!(text.contains("README.md"), "file row missing:\n{text}");
         assert!(text.contains("src"), "folder row missing:\n{text}");
+        // Both files are unreviewed → ● glyphs and a (A) tag for the addition.
+        assert!(text.contains("●"), "unreviewed glyph missing:\n{text}");
+        assert!(text.contains("(A)"), "added kind tag missing:\n{text}");
         // No file selected → diff panel shows its placeholder.
         assert!(
             text.contains("Select a file"),
             "diff placeholder missing:\n{text}"
         );
-        // Status bar chrome.
+        // Status bar chrome + review counts (2 unreviewed).
         assert!(text.contains("hunkr"), "status bar missing:\n{text}");
+        assert!(text.contains("✓0 ●2 ↻0"), "review counts missing:\n{text}");
         assert!(text.contains("q quit"), "key hints missing:\n{text}");
     }
 

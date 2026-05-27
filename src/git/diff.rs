@@ -5,6 +5,7 @@
 //! output; cost is O(diff size), which is bounded by *what changed*, so even a
 //! huge file with a small edit parses instantly.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,8 +45,8 @@ pub fn detect_base(repo_root: &Path) -> DiffBase {
     }
 }
 
-/// Fetch and parse the diff for one file.
-pub fn fetch_file_diff(repo_root: &Path, base: DiffBase, file: &ChangedFile) -> Result<FileDiff> {
+/// Fetch the raw unified-diff text for one file.
+fn fetch_diff_text(repo_root: &Path, base: DiffBase, file: &ChangedFile) -> Result<String> {
     let path = file.path.to_string_lossy();
     let out = if file.kind.is_untracked() {
         // No blob in the base → synthesize an all-addition diff. Exit code 1 is
@@ -76,9 +77,37 @@ pub fn fetch_file_diff(repo_root: &Path, base: DiffBase, file: &ChangedFile) -> 
             ],
         )?
     };
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
 
-    let text: Arc<str> = Arc::from(String::from_utf8_lossy(&out).into_owned());
+/// Fetch and parse the diff for one file.
+pub fn fetch_file_diff(repo_root: &Path, base: DiffBase, file: &ChangedFile) -> Result<FileDiff> {
+    let text: Arc<str> = Arc::from(fetch_diff_text(repo_root, base, file)?);
     Ok(parse_unified(text, file.path.clone()))
+}
+
+/// Stable, deterministic hash of a diff's text. seahash (not the default,
+/// per-process-seeded hasher) so a hash persisted this session still matches
+/// next session.
+pub fn hash_text(text: &str) -> u64 {
+    seahash::hash(text.as_bytes())
+}
+
+/// Compute current diff hashes for the given files. Used off the UI thread to
+/// detect when a previously-reviewed file has changed. Files whose diff can't
+/// be fetched are omitted.
+pub fn diff_hashes_for<'a>(
+    repo_root: &Path,
+    base: DiffBase,
+    files: impl IntoIterator<Item = &'a ChangedFile>,
+) -> HashMap<PathBuf, u64> {
+    let mut map = HashMap::new();
+    for f in files {
+        if let Ok(text) = fetch_diff_text(repo_root, base, f) {
+            map.insert(f.path.clone(), hash_text(&text));
+        }
+    }
+    map
 }
 
 /// Parse unified-diff `text` into a [`FileDiff`]. Header preamble lines

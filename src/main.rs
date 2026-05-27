@@ -10,6 +10,7 @@ mod cli;
 mod event;
 mod git;
 mod model;
+mod persist;
 mod render;
 mod terminal;
 mod ui;
@@ -45,7 +46,7 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
 
     // Off-thread git worker + filesystem watcher for hot reload. If watching
     // can't start, the app still works — it just won't auto-refresh.
-    let git_req = event::spawn_git_worker(app.repo_root.clone(), tx.clone());
+    let git_req = event::spawn_git_worker(app.repo_root.clone(), app.base, tx.clone());
     if let Err(e) = watch::spawn(app.repo_root.clone(), tx.clone()) {
         app.error = Some(format!("watch disabled: {e}"));
     }
@@ -59,8 +60,9 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
         match rx.recv() {
             Ok(Event::Input(ev)) => handle_terminal_event(app, ev),
             Ok(Event::Fs) => {
-                // A change landed; ask the worker to recompute off-thread.
-                let _ = git_req.send(());
+                // A change landed; recompute off-thread, re-hashing the files
+                // currently marked reviewed so we can flag any that changed.
+                let _ = git_req.send(app.reviewed_paths());
             }
             Ok(Event::Refreshed(snapshot)) => app.reconcile(snapshot),
             Ok(Event::Error(msg)) => {
