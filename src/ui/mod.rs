@@ -170,13 +170,13 @@ mod tests {
 
         let first = text.lines().find(|l| l.contains("first")).unwrap();
         let second = text.lines().find(|l| l.contains("second")).unwrap();
-        // The current hunk's header carries the `>` marker; the other doesn't.
+        // The current hunk's header carries the accent bar; the other doesn't.
         assert!(
-            second.contains("> @@"),
+            second.contains("| @@"),
             "current hunk header should be marked:\n{text}"
         );
         assert!(
-            !first.contains("> @@"),
+            !first.contains("| @@"),
             "non-current hunk header should not be marked:\n{text}"
         );
     }

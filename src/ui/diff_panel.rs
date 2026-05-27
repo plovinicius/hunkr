@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, RowRef, SideRow, ViewMode};
 use crate::glyphs::Glyphs;
@@ -18,9 +18,14 @@ use crate::render::viewport;
 /// Tab stop width used when expanding tabs for display.
 const TAB_WIDTH: usize = 4;
 
-/// Background fill for the hunk the `n`/`p` cursor is on, so the current change
-/// reads at a glance.
-const CURRENT_HUNK_BG: Color = Color::Indexed(238);
+/// Background fill behind the current hunk's header row — the brightest part of
+/// the active block.
+const CURRENT_HUNK_HEADER_BG: Color = Color::Indexed(238);
+/// Subtler fill behind the current hunk's body rows, so the whole hunk reads as
+/// one active block without washing out the `+`/`-` colours.
+const CURRENT_HUNK_BODY_BG: Color = Color::Indexed(236);
+/// Colour of the left accent bar marking the current hunk's left edge.
+const CURRENT_HUNK_BAR: Color = Color::Yellow;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Diff;
@@ -97,10 +102,15 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                     fmt_no(dl.old_no),
                     fmt_no(dl.new_no)
                 );
-                lines.push(Line::from(vec![
-                    Span::styled(gutter, dim),
-                    Span::styled(content, Style::default().fg(color)),
-                ]));
+                lines.push(body_line(
+                    h == app.current_hunk,
+                    gutter,
+                    content,
+                    color,
+                    &app.glyphs,
+                    inner.width as usize,
+                    dim,
+                ));
             }
         }
     }
@@ -110,12 +120,14 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
 
 fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     let width = inner.width as usize;
-    if width < 3 {
+    if width < 4 {
         return;
     }
-    // Two equal columns separated by a single divider column.
-    let left_w = (width - 1) / 2;
-    let right_w = width - 1 - left_w;
+    // Reserve one column for the current-hunk accent bar; the rest splits into
+    // two equal columns separated by a single divider column.
+    let content_w = width - 1;
+    let left_w = (content_w - 1) / 2;
+    let right_w = content_w - 1 - left_w;
 
     let height = inner.height as usize;
     let window = viewport::visible_range(app.scroll, height, app.side_rows.len());
@@ -129,13 +141,29 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                 lines.push(header_line(text, h == app.current_hunk, &app.glyphs, width));
             }
             SideRow::Pair { left, right } => {
+                let current = left.or(right).map(|(h, _)| h) == Some(app.current_hunk);
+                let lead = if current { app.glyphs.hunk_bar } else { ' ' };
                 let (lc, ls) = side_cell(fd, left, left_w, Side::Old);
                 let (rc, rs) = side_cell(fd, right, right_w, Side::New);
-                lines.push(Line::from(vec![
-                    Span::styled(lc, ls),
-                    Span::styled("│", divider),
-                    Span::styled(rc, rs),
-                ]));
+                if current {
+                    let bg = CURRENT_HUNK_BODY_BG;
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            lead.to_string(),
+                            Style::default().fg(CURRENT_HUNK_BAR).bg(bg),
+                        ),
+                        Span::styled(lc, ls.bg(bg)),
+                        Span::styled("│", divider.bg(bg)),
+                        Span::styled(rc, rs.bg(bg)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled(lead.to_string(), divider),
+                        Span::styled(lc, ls),
+                        Span::styled("│", divider),
+                        Span::styled(rc, rs),
+                    ]));
+                }
             }
         }
     }
@@ -186,18 +214,18 @@ fn side_cell(
     (text, Style::default().fg(color))
 }
 
-/// Build a styled hunk-header line. The hunk the `n`/`p` cursor is on gets a
-/// marker, a contrasting colour, and a full-width background fill so it's
-/// obvious which change is selected; others keep a blank marker column so the
+/// Build a styled hunk-header line. The hunk the `n`/`p` cursor is on gets the
+/// accent bar, a contrasting colour, and a full-width background fill so it's
+/// obvious which change is selected; others keep a blank lead column so the
 /// header text doesn't shift as you navigate. The line is padded/truncated to
 /// `width` so the highlight fills the row.
 fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<'a> {
-    let marker = if current { g.hunk_cursor } else { ' ' };
-    let body = fit(&format!("{marker} {text}"), width);
+    let lead = if current { g.hunk_bar } else { ' ' };
+    let body = fit(&format!("{lead} {text}"), width);
     let style = if current {
         Style::default()
             .fg(Color::Yellow)
-            .bg(CURRENT_HUNK_BG)
+            .bg(CURRENT_HUNK_HEADER_BG)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -205,6 +233,41 @@ fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<
             .add_modifier(Modifier::BOLD)
     };
     Line::styled(body, style)
+}
+
+/// Build a styled unified body row. Rows inside the current hunk get the left
+/// accent bar and a subtle full-row background wash, so the whole hunk reads as
+/// one active block. The leading bar column is present (as a blank) on every
+/// row so content stays vertically aligned as the cursor moves between hunks.
+fn body_line<'a>(
+    current: bool,
+    gutter: String,
+    content: String,
+    color: Color,
+    g: &Glyphs,
+    width: usize,
+    dim: Style,
+) -> Line<'a> {
+    let lead = if current { g.hunk_bar } else { ' ' };
+    if current {
+        let bg = CURRENT_HUNK_BODY_BG;
+        // Pad the content so the wash fills the row out to the right edge.
+        let pad = width.saturating_sub(1 + gutter.width());
+        Line::from(vec![
+            Span::styled(
+                lead.to_string(),
+                Style::default().fg(CURRENT_HUNK_BAR).bg(bg),
+            ),
+            Span::styled(gutter, dim.bg(bg)),
+            Span::styled(fit(&content, pad), Style::default().fg(color).bg(bg)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(lead.to_string(), dim),
+            Span::styled(gutter, dim),
+            Span::styled(content, Style::default().fg(color)),
+        ])
+    }
 }
 
 fn line_marker(kind: LineKind) -> (char, Color) {

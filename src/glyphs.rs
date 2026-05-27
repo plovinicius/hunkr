@@ -19,8 +19,9 @@ pub struct Glyphs {
     pub sep: &'static str,
     /// Placeholder when there's no current hunk.
     pub dash: &'static str,
-    /// Marker on the hunk the `n`/`p` cursor is currently on.
-    pub hunk_cursor: char,
+    /// Left accent bar drawn down every row of the hunk the `n`/`p` cursor is
+    /// currently on, marking the active block's left edge.
+    pub hunk_bar: char,
 }
 
 impl Glyphs {
@@ -35,7 +36,7 @@ impl Glyphs {
             cursor: '_',
             sep: " | ",
             dash: "-",
-            hunk_cursor: '>',
+            hunk_bar: '|',
         }
     }
 
@@ -53,7 +54,7 @@ impl Glyphs {
             cursor: '│',
             sep: " · ",
             dash: "—",
-            hunk_cursor: '▸',
+            hunk_bar: '▌',
         }
     }
 
