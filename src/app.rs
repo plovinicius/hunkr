@@ -180,6 +180,28 @@ impl App {
         self.dirty = true;
     }
 
+    // ── AI reference ───────────────────────────────────────────────────────
+
+    /// Copy an AI-ready reference for the current hunk to the clipboard.
+    fn copy_reference(&mut self) {
+        let text = match &self.diff {
+            Some(fd) if !fd.hunks.is_empty() => {
+                let h = self.current_hunk.min(fd.hunks.len() - 1);
+                crate::reference::build_hunk_reference(fd, h)
+            }
+            _ => {
+                self.error = Some("no hunk to copy".into());
+                self.dirty = true;
+                return;
+            }
+        };
+        match crate::reference::copy(&text) {
+            Ok(method) => self.status_msg = Some(format!("copied reference via {method}")),
+            Err(e) => self.error = Some(format!("copy failed: {e}")),
+        }
+        self.dirty = true;
+    }
+
     // ── selection ────────────────────────────────────────────────────────
 
     fn node_at_cursor(&self) -> Option<usize> {
@@ -466,6 +488,7 @@ impl App {
             (KeyCode::Char('p'), _) => self.prev_hunk(),
             (KeyCode::Char('r'), _) => self.mark_reviewed(),
             (KeyCode::Char('u'), _) => self.unmark_reviewed(),
+            (KeyCode::Char('y'), _) => self.copy_reference(),
             (KeyCode::Char(']'), _) => self.next_file(),
             (KeyCode::Char('['), _) => self.prev_file(),
             (KeyCode::Char('g'), _) => {

@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::model::review::ReviewStatus;
 
-const HINTS: &str = " j/k move · n/p hunk · r/u review · ]/[ file · q quit ";
+const HINTS: &str = " j/k move · n/p hunk · r review · y copy · ]/[ file · q quit ";
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let bar = Style::default().bg(Color::Indexed(236)).fg(Color::Gray);

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+arboard = "3.6.1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
 notify = "8.2.0"

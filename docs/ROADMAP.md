@@ -36,9 +36,13 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   - persisted to `.git/hunkr/review.json` (versioned schema), loaded on startup
   - tree shows `✓ ● ↻` glyphs; status bar shows review counts
   - current hashes recomputed off-thread for only the (small) reviewed set on refresh
-- ⬜ **M5 — AI reference copy**: `y` → prompt builder → `arboard` + OSC 52 fallback + status flash.
-- ⬜ **M6 — Polish**: `/` file filter, `?` help overlay, status-bar counts, diff cache +
-  bounded hydration, richer error flashes.
+- ✅ **M5 — AI reference copy**
+  - `y` builds an AI-ready prompt for the current hunk (File / Change # / Lines / fenced
+    `diff` snippet / `Issue:` slot) — `src/reference.rs`
+  - copies via `arboard`, falling back to an OSC 52 escape (built-in base64) for tmux/SSH;
+    status bar reports which path was used
+- ⬜ **M6 — Polish**: `/` file filter, `?` help overlay, diff cache + bounded hydration,
+  richer error flashes.
 
 ## Later (not MVP)
 

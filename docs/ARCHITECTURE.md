@@ -155,11 +155,14 @@ flips a changed file to `↻`. Records persist to `.git/hunkr/review.json` via `
 (versioned `schema`; git dir resolved with `rev-parse --absolute-git-dir` for worktree
 correctness), loaded on startup, rewritten on each change.
 
-## AI reference copy _(planned: M5)_
+## AI reference copy
 
-`y` on a hunk builds an AI-ready prompt (file, change #, line range, the diff snippet, an
-`Issue:` slot) and copies via `arboard`, with an **OSC 52** fallback so it works over
-tmux/SSH.
+`y` on a hunk builds an AI-ready prompt (file, change #, new-file line range, the exact
+raw diff snippet, and an `Issue:` slot) in `src/reference.rs` and copies it via `arboard`,
+falling back to an **OSC 52** terminal escape (with a built-in base64 encoder) so it works
+over tmux/SSH where there's no local display. The status bar reports which path was used.
+The line range is derived from the hunk's actual line numbers; the snippet is sliced
+byte-for-byte from the backing diff text.
 
 ## Caching _(planned: M6)_
 

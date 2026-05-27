@@ -11,6 +11,7 @@ mod event;
 mod git;
 mod model;
 mod persist;
+mod reference;
 mod render;
 mod terminal;
 mod ui;
