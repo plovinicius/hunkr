@@ -28,7 +28,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let dim = Style::default().fg(Color::DarkGray);
     let height = inner.height as usize;
     // Keep the cursor row within the visible window (simple top-anchored scroll).
     let top = app.tree_cursor.saturating_sub(height.saturating_sub(1));
@@ -59,13 +58,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 node.name.clone()
             };
             spans.push(Span::raw(name));
-            if let Some(suffix) = kind_suffix(&file.kind) {
-                spans.push(Span::styled(suffix, dim));
+            if let Some((suffix, style)) = kind_suffix(&file.kind) {
+                spans.push(Span::styled(suffix, style));
             }
             if file.additions > 0 || file.deletions > 0 {
+                spans.push(Span::raw("  "));
                 spans.push(Span::styled(
-                    format!("  +{} -{}", file.additions, file.deletions),
-                    dim,
+                    format!("+{}", file.additions),
+                    Style::default().fg(Color::Green),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!("-{}", file.deletions),
+                    Style::default().fg(Color::Red),
                 ));
             }
         } else {
@@ -80,6 +85,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
 
+        if i == app.tree_cursor {
+            // Pad to inner width so the row highlight extends past the text.
+            let used: u16 = spans.iter().map(|s| s.width() as u16).sum();
+            if used < inner.width {
+                spans.push(Span::raw(" ".repeat((inner.width - used) as usize)));
+            }
+        }
         let mut line = Line::from(spans);
         if i == app.tree_cursor {
             // Background highlight (not REVERSED) so status colors stay readable.
@@ -104,10 +116,15 @@ fn status_color(status: ReviewStatus) -> Color {
 }
 
 /// A short kind tag for anything other than a plain modification.
-fn kind_suffix(kind: &ChangeKind) -> Option<String> {
+fn kind_suffix(kind: &ChangeKind) -> Option<(String, Style)> {
+    let dim = Style::default().fg(Color::DarkGray);
     match kind {
         ChangeKind::Modified => None,
-        other => Some(format!(" ({})", other.glyph())),
+        ChangeKind::Added | ChangeKind::Untracked => {
+            Some((" (+)".to_string(), Style::default().fg(Color::Green)))
+        }
+        ChangeKind::Deleted => Some((" (-)".to_string(), Style::default().fg(Color::Red))),
+        other => Some((format!(" ({})", other.glyph()), dim)),
     }
 }
 
