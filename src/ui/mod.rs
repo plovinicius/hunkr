@@ -10,10 +10,7 @@ mod tree_panel;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
-use crate::app::{App, Mode};
-
-/// Width of the file-tree panel, in columns.
-const TREE_WIDTH: u16 = 44;
+use crate::app::{App, MIN_DIFF_WIDTH, MIN_TREE_WIDTH, Mode};
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -21,8 +18,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
     let body = rows[0];
     let status = rows[1];
 
-    let cols =
-        Layout::horizontal([Constraint::Length(TREE_WIDTH), Constraint::Min(20)]).split(body);
+    // Record the body width so resize handlers can clamp the sidebar against
+    // the current terminal size, then derive the actually-rendered tree width.
+    app.body_width = body.width;
+    let max_tree = body
+        .width
+        .saturating_sub(MIN_DIFF_WIDTH)
+        .max(MIN_TREE_WIDTH);
+    let tree_width = app.tree_width.clamp(MIN_TREE_WIDTH, max_tree);
+
+    let cols = Layout::horizontal([
+        Constraint::Length(tree_width),
+        Constraint::Min(MIN_DIFF_WIDTH),
+    ])
+    .split(body);
     let tree_area = cols[0];
     let diff_area = cols[1];
 
@@ -85,8 +94,8 @@ mod tests {
         );
         assert!(text.contains("README.md"), "file row missing:\n{text}");
         assert!(text.contains("src"), "folder row missing:\n{text}");
-        // Default glyphs are ASCII-safe: unreviewed [ ] and an (A) tag.
-        assert!(text.contains("[ ]"), "unreviewed glyph missing:\n{text}");
+        // Default glyphs are Unicode: unreviewed ● and an (A) kind tag.
+        assert!(text.contains("●"), "unreviewed glyph missing:\n{text}");
         assert!(text.contains("(A)"), "added kind tag missing:\n{text}");
         // No file selected → diff panel shows its placeholder.
         assert!(
@@ -95,10 +104,7 @@ mod tests {
         );
         // Status bar chrome + review counts (2 unreviewed).
         assert!(text.contains("hunkr"), "status bar missing:\n{text}");
-        assert!(
-            text.contains("[x] 0 | [ ] 2 | [!] 0"),
-            "review counts missing:\n{text}"
-        );
+        assert!(text.contains("✓ 0 · ● 2"), "review counts missing:\n{text}");
         assert!(text.contains("q quit"), "key hints missing:\n{text}");
     }
 
@@ -172,11 +178,11 @@ mod tests {
         let second = text.lines().find(|l| l.contains("second")).unwrap();
         // The current hunk's header carries the accent bar; the other doesn't.
         assert!(
-            second.contains("| @@"),
+            second.contains("▌ @@"),
             "current hunk header should be marked:\n{text}"
         );
         assert!(
-            !first.contains("| @@"),
+            !first.contains("▌ @@"),
             "non-current hunk header should not be marked:\n{text}"
         );
     }

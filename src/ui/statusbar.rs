@@ -22,12 +22,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.status_msg {
         format!(" {msg}")
     } else {
-        let (mut reviewed, mut unreviewed, mut changed) = (0u32, 0u32, 0u32);
+        let (mut reviewed, mut unreviewed) = (0u32, 0u32);
         for i in 0..app.files.len() {
             match app.review_status(i) {
                 ReviewStatus::Reviewed => reviewed += 1,
                 ReviewStatus::Unreviewed => unreviewed += 1,
-                ReviewStatus::ChangedAfterReview => changed += 1,
             }
         }
         let hunk = match &app.diff {
@@ -44,8 +43,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         // Each count is its own separator-delimited segment so the groups read
         // as evenly spaced regardless of glyph width.
         format!(
-            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{} {changed}{sep}{hunk}{filter}",
-            g.reviewed, g.unreviewed, g.changed,
+            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{hunk}{filter}",
+            g.reviewed, g.unreviewed,
         )
     };
 

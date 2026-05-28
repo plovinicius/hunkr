@@ -100,7 +100,6 @@ fn status_color(status: ReviewStatus) -> Color {
     match status {
         ReviewStatus::Reviewed => Color::Green,
         ReviewStatus::Unreviewed => Color::DarkGray,
-        ReviewStatus::ChangedAfterReview => Color::Yellow,
     }
 }
 

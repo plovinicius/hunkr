@@ -48,10 +48,10 @@ fn main() -> Result<()> {
     };
     let repo_root = git::repo::discover(&start)?;
     let mut app = App::new(repo_root)?;
-    app.glyphs = if args.unicode {
-        glyphs::Glyphs::unicode()
-    } else {
+    app.glyphs = if args.ascii {
         glyphs::Glyphs::ascii()
+    } else {
+        glyphs::Glyphs::unicode()
     };
 
     terminal::install_panic_hook();

@@ -13,7 +13,7 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
 2. `hunkr` auto-refreshes the diff (filesystem watch + off-thread git).
 3. You review file-by-file / hunk-by-hunk.
 4. Mark files reviewed (`r`). Reviewed state is tied to the file's diff hash, so if the
-   file changes again it automatically flips to "changed after review" (`↻`).
+   file changes again it automatically falls back to unreviewed.
 5. Press `y` to copy an AI-ready reference for the current hunk and paste it back to the
    agent.
 6. Repeat — never leaving the terminal.
@@ -23,13 +23,13 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
 ```sh
 cargo run                  # review the repo in the current directory
 cargo run -- PATH          # review the repo containing PATH
-cargo run -- --unicode     # use Unicode icons (✓ ●) instead of ASCII
+cargo run -- --ascii       # force ASCII icons ([x] [ ] v >) instead of Unicode
 ```
 
-Icons are ASCII by default (`[x]` reviewed, `[ ]` unreviewed, `[!]` changed-after-review,
-`>`/`v` folders) so they render in any terminal/font; pass `--unicode` for the prettier
-symbols (`✓`, `●`) if your font supports them. Glyphs known to render double-width in many
-fonts (`↻`, `⚠`) are deliberately avoided so columns stay aligned.
+Icons are Unicode by default (`✓` reviewed, `●` unreviewed, `▸`/`▾` folders); pass
+`--ascii` for a plain-text set (`[x]`, `[ ]`, `>`/`v`) if your terminal/font mis-renders
+them. Glyphs known to render double-width in many fonts (`↻`, `⚠`) are deliberately
+avoided so columns stay aligned.
 
 Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 (staged + unstaged + untracked), or the empty tree when the repo has no commits yet.
@@ -47,7 +47,7 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `g` / `G` | top / bottom of diff                     |
 | `Tab`     | switch tree / diff focus                 |
 | `Enter`   | expand-collapse folder / focus diff      |
-| `r` / `u` | mark / unmark reviewed                   |
+| `r`       | toggle reviewed                          |
 | `y`       | copy AI reference for the hunk           |
 | `e`       | open the file in `$EDITOR` at the line   |
 | `/`       | filter files (`Esc` clears)              |

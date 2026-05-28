@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use crate::cache::DiffCache;
@@ -32,6 +32,17 @@ const DIFF_CACHE_CAP: usize = 128;
 
 /// Rows the diff scrolls per mouse-wheel notch.
 const MOUSE_SCROLL_LINES: isize = 3;
+
+/// Default width of the file-tree sidebar, in columns.
+const DEFAULT_TREE_WIDTH: u16 = 44;
+/// Lower bound on the sidebar width — narrow enough to be useful, wide enough
+/// to still fit a status glyph + a short filename.
+pub const MIN_TREE_WIDTH: u16 = 16;
+/// Lower bound on the diff panel width; the sidebar may not grow past
+/// `body_width - MIN_DIFF_WIDTH`.
+pub const MIN_DIFF_WIDTH: u16 = 20;
+/// Columns the sidebar grows/shrinks per `>` / `<` keypress.
+const TREE_RESIZE_STEP: u16 = 2;
 
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -131,7 +142,7 @@ pub struct App {
     pub focus: Focus,
     pub mode: Mode,
     pub view: ViewMode,
-    /// Glyph set used for rendering (ASCII by default, Unicode with --unicode).
+    /// Glyph set used for rendering (Unicode by default, ASCII with --ascii).
     pub glyphs: Glyphs,
     /// Active file-filter query (empty = no filter).
     pub filter: String,
@@ -143,6 +154,16 @@ pub struct App {
     /// Left column (x origin) of the diff panel, updated by the renderer each
     /// frame, so mouse-wheel events can be routed to the panel under the cursor.
     pub diff_x: u16,
+    /// Width of the file-tree sidebar in columns. Adjustable with `<` / `>` and
+    /// by dragging the divider with the mouse; the renderer clamps the visible
+    /// layout to fit the current terminal width.
+    pub tree_width: u16,
+    /// Full body width (terminal width) recorded by the renderer each frame, so
+    /// resize handlers can clamp the sidebar against the current terminal size.
+    pub body_width: u16,
+    /// True while the user is holding the left mouse button after grabbing the
+    /// tree/diff divider — subsequent drag events resize the sidebar.
+    dragging_divider: bool,
 
     pub status_msg: Option<String>,
     pub error: Option<String>,
@@ -159,7 +180,7 @@ impl App {
         let git_dir = git::repo::git_dir(&repo_root)?;
         let review = ReviewStore::load(&git_dir);
         // Compute current hashes for the (typically few) reviewed files up front
-        // so their ✓/↻ status is correct on the very first paint.
+        // so their ✓ status is correct on the very first paint.
         let hashes = git::diff::diff_hashes_for(
             &repo_root,
             base,
@@ -200,12 +221,15 @@ impl App {
             focus: Focus::Tree,
             mode: Mode::Normal,
             view: ViewMode::Unified,
-            glyphs: Glyphs::ascii(),
+            glyphs: Glyphs::unicode(),
             filter: String::new(),
             should_quit: false,
             dirty: true,
             diff_height: 0,
             diff_x: 0,
+            tree_width: DEFAULT_TREE_WIDTH,
+            body_width: 0,
+            dragging_divider: false,
             status_msg: None,
             error: None,
             pending_editor: None,
@@ -231,36 +255,30 @@ impl App {
         self.diff.as_ref().map(|d| git::diff::hash_text(&d.text))
     }
 
-    fn mark_reviewed(&mut self) {
+    /// Toggle the reviewed state for the file under the cursor. A reviewed file
+    /// becomes unreviewed; otherwise the current diff hash is recorded as the
+    /// reviewed hash (which also re-affirms a file that changed since last
+    /// review).
+    fn toggle_reviewed(&mut self) {
         let Some(fi) = self.current_file_index() else {
             return;
         };
         let path = self.files[fi].path.clone();
-        let Some(hash) = self.selected_hash() else {
-            self.error = Some("no diff to mark reviewed".into());
-            return;
-        };
-        match self.review.mark(path.clone(), hash, unix_now()) {
-            Ok(()) => {
-                self.hashes.insert(path, hash);
-                self.status_msg = Some("marked reviewed".into());
-            }
-            Err(e) => self.error = Some(format!("could not save review state: {e}")),
-        }
-        self.dirty = true;
-    }
-
-    fn unmark_reviewed(&mut self) {
-        let Some(fi) = self.current_file_index() else {
-            return;
-        };
-        let path = self.files[fi].path.clone();
-        match self.review.unmark(&path) {
-            Ok(()) => {
+        let result = if self.review_status(fi) == ReviewStatus::Reviewed {
+            self.review.unmark(&path).map(|_| {
                 self.hashes.remove(&path);
-                self.status_msg = Some("unmarked".into());
-            }
-            Err(e) => self.error = Some(format!("could not save review state: {e}")),
+            })
+        } else {
+            let Some(hash) = self.selected_hash() else {
+                self.error = Some("no diff to mark reviewed".into());
+                return;
+            };
+            self.review.mark(path.clone(), hash, unix_now()).map(|_| {
+                self.hashes.insert(path, hash);
+            })
+        };
+        if let Err(e) = result {
+            self.error = Some(format!("could not save review state: {e}"));
         }
         self.dirty = true;
     }
@@ -380,7 +398,7 @@ impl App {
         let prev_hunk = self.current_hunk;
 
         // Adopt the worker's freshly computed hashes for reviewed files; this is
-        // what flips a reviewed file to ↻ once it changes on disk.
+        // what flips a reviewed file back to unreviewed once it changes on disk.
         self.hashes = snapshot.hashes;
         self.apply_files(snapshot.files, prev_path.as_deref());
 
@@ -692,26 +710,74 @@ impl App {
         self.current_hunk = h;
     }
 
+    // ── sidebar resize ─────────────────────────────────────────────────────
+
+    /// Upper bound on the sidebar width given the current terminal size; falls
+    /// back to the lower bound until the renderer has reported a body width.
+    fn max_tree_width(&self) -> u16 {
+        self.body_width
+            .saturating_sub(MIN_DIFF_WIDTH)
+            .max(MIN_TREE_WIDTH)
+    }
+
+    /// Set the sidebar width, clamped to `[MIN_TREE_WIDTH, max_tree_width()]`.
+    fn set_tree_width(&mut self, w: u16) {
+        let new = w.clamp(MIN_TREE_WIDTH, self.max_tree_width());
+        if new != self.tree_width {
+            self.tree_width = new;
+            self.dirty = true;
+        }
+    }
+
+    fn widen_tree(&mut self) {
+        self.set_tree_width(self.tree_width.saturating_add(TREE_RESIZE_STEP));
+    }
+
+    fn narrow_tree(&mut self) {
+        self.set_tree_width(self.tree_width.saturating_sub(TREE_RESIZE_STEP));
+    }
+
+    /// The two-column hit zone for the tree/diff divider. Either the tree's
+    /// right border or the diff's left border counts as a grab.
+    fn is_divider_column(&self, column: u16) -> bool {
+        let left = self.tree_width.saturating_sub(1);
+        column == left || column == self.tree_width
+    }
+
     // ── input ────────────────────────────────────────────────────────────
 
-    /// Route a mouse-wheel notch to the panel under the cursor: over the diff
-    /// it scrolls a few lines; over the tree it nudges the selection one row.
+    /// Route mouse events: a wheel notch scrolls the panel under the cursor,
+    /// and a left-click on the tree/diff divider starts a drag-to-resize.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
-        let down = match ev.kind {
-            MouseEventKind::ScrollDown => true,
-            MouseEventKind::ScrollUp => false,
-            _ => return,
-        };
-        if ev.column >= self.diff_x {
-            self.scroll_by(if down {
-                MOUSE_SCROLL_LINES
-            } else {
-                -MOUSE_SCROLL_LINES
-            });
-        } else if down {
-            self.cursor_down();
-        } else {
-            self.cursor_up();
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.is_divider_column(ev.column) {
+                    self.dragging_divider = true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_divider => {
+                // Move the divider to the cursor: column X means the tree's
+                // right border sits at X, so tree_width = X + 1.
+                self.set_tree_width(ev.column.saturating_add(1));
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging_divider = false;
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let down = matches!(ev.kind, MouseEventKind::ScrollDown);
+                if ev.column >= self.diff_x {
+                    self.scroll_by(if down {
+                        MOUSE_SCROLL_LINES
+                    } else {
+                        -MOUSE_SCROLL_LINES
+                    });
+                } else if down {
+                    self.cursor_down();
+                } else {
+                    self.cursor_up();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -812,12 +878,13 @@ impl App {
             (KeyCode::Char('n'), _) => self.next_hunk(),
             (KeyCode::Char('p'), _) => self.prev_hunk(),
             (KeyCode::Char('s'), _) => self.toggle_view(),
-            (KeyCode::Char('r'), _) => self.mark_reviewed(),
-            (KeyCode::Char('u'), _) => self.unmark_reviewed(),
+            (KeyCode::Char('r'), _) => self.toggle_reviewed(),
             (KeyCode::Char('y'), _) => self.copy_reference(),
             (KeyCode::Char('e'), _) => self.open_in_editor(),
             (KeyCode::Char(']'), _) => self.next_file(),
             (KeyCode::Char('['), _) => self.prev_file(),
+            (KeyCode::Char('<'), _) => self.narrow_tree(),
+            (KeyCode::Char('>'), _) => self.widen_tree(),
             (KeyCode::Char('g'), _) => {
                 self.scroll = 0;
                 self.sync_hunk_from_scroll();
@@ -1055,7 +1122,10 @@ mod tests {
         for i in 0..30 {
             raw.push_str(&format!(" line{i}\n"));
         }
-        a.set_diff_for_test(parse_unified(Arc::from(raw.as_str()), PathBuf::from("src/foo.rs")));
+        a.set_diff_for_test(parse_unified(
+            Arc::from(raw.as_str()),
+            PathBuf::from("src/foo.rs"),
+        ));
         a
     }
 
@@ -1065,7 +1135,10 @@ mod tests {
         a.diff_height = 5;
 
         a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
-        assert_eq!(a.scroll, 5, "Shift+Down should page down by the viewport height");
+        assert_eq!(
+            a.scroll, 5,
+            "Shift+Down should page down by the viewport height"
+        );
 
         a.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
         assert_eq!(a.scroll, 0, "Shift+Up should page back to the top");
@@ -1102,5 +1175,67 @@ mod tests {
         // A wheel notch left of the diff's edge targets the tree, not the diff.
         a.on_mouse(wheel(MouseEventKind::ScrollUp, 5));
         assert_eq!(a.scroll, 0, "tree-side wheel must not scroll the diff");
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn angle_keys_resize_the_sidebar() {
+        let mut a = app(vec![file("a.rs")]);
+        a.body_width = 120;
+        let start = a.tree_width;
+
+        a.on_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        assert_eq!(a.tree_width, start + TREE_RESIZE_STEP, "> should widen");
+
+        a.on_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE));
+        assert_eq!(a.tree_width, start, "< should narrow back");
+    }
+
+    #[test]
+    fn sidebar_resize_clamps_to_bounds() {
+        let mut a = app(vec![file("a.rs")]);
+        a.body_width = 80;
+
+        // Spam < well past the floor; width should pin to MIN_TREE_WIDTH.
+        for _ in 0..200 {
+            a.on_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE));
+        }
+        assert_eq!(a.tree_width, MIN_TREE_WIDTH);
+
+        // Spam > past the cap; width should leave MIN_DIFF_WIDTH for the diff.
+        for _ in 0..200 {
+            a.on_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        }
+        assert_eq!(a.tree_width, a.body_width - MIN_DIFF_WIDTH);
+    }
+
+    #[test]
+    fn mouse_drag_on_divider_resizes_sidebar() {
+        let mut a = app(vec![file("a.rs")]);
+        a.body_width = 120;
+        let start = a.tree_width;
+
+        // Press without grabbing the divider: nothing should arm.
+        a.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5));
+        a.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 70));
+        assert_eq!(a.tree_width, start, "drag without grabbing must not resize");
+
+        // Grab the divider (tree's right border = tree_width - 1) and drag right.
+        a.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start - 1));
+        a.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 70));
+        assert_eq!(a.tree_width, 71, "divider should follow the cursor");
+
+        // Releasing the button disarms the drag.
+        a.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 70));
+        a.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30));
+        assert_eq!(a.tree_width, 71, "drag after release must not resize");
     }
 }

@@ -14,7 +14,8 @@ pub struct Args {
     /// Path inside the git repository to review (defaults to the current directory).
     pub path: Option<PathBuf>,
 
-    /// Use Unicode icons (✓ ● …) instead of the ASCII-safe defaults.
+    /// Force the ASCII-safe glyph set ([x] [ ] …) instead of the default
+    /// Unicode icons (✓ ● …) — useful on terminals/fonts that mis-render them.
     #[arg(long)]
-    pub unicode: bool,
+    pub ascii: bool,
 }

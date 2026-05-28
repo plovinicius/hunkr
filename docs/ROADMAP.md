@@ -31,10 +31,10 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   - `App::reconcile` preserves selection by path and keeps exact scroll + current hunk
     when the selected file's diff is byte-for-byte unchanged
 - ✅ **M4 — Reviewed state**
-  - `r` mark / `u` unmark; status tied to a **deterministic diff hash** (seahash) so a
-    file that changes again auto-surfaces as `↻ ChangedAfterReview`
+  - `r` toggles reviewed; status tied to a **deterministic diff hash** (seahash) so a
+    file that changes again automatically falls back to unreviewed
   - persisted to `.git/hunkr/review.json` (versioned schema), loaded on startup
-  - tree shows `✓ ● ↻` glyphs; status bar shows review counts
+  - tree shows `✓ ●` glyphs; status bar shows review counts
   - current hashes recomputed off-thread for only the (small) reviewed set on refresh
 - ✅ **M5 — AI reference copy**
   - `y` builds an AI-ready prompt for the current hunk (File / Change # / Lines / fenced

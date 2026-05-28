@@ -10,6 +10,7 @@ use crate::model::file::ChangedFile;
 pub struct GitSnapshot {
     pub files: Vec<ChangedFile>,
     /// Current diff hashes for the files the UI asked about (the reviewed set),
-    /// used to detect "changed after review". Unreviewed files are omitted.
+    /// used to flip a reviewed file back to unreviewed when its diff changes on
+    /// disk. Unreviewed files are omitted.
     pub hashes: HashMap<PathBuf, u64>,
 }

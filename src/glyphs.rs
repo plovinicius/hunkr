@@ -1,6 +1,7 @@
-//! UI glyph set. ASCII by default so icons render in any terminal/font/tmux;
-//! `--unicode` opts into the prettier symbols. This is the single source of
-//! truth for every non-text marker the UI draws.
+//! UI glyph set. Unicode (✓ ● ▾ ▸ …) by default; `--ascii` falls back to a
+//! plain-text set ([x] [ ] v >) for terminals/fonts that mis-render the
+//! symbols. This is the single source of truth for every non-text marker the
+//! UI draws.
 
 use crate::model::review::ReviewStatus;
 
@@ -8,7 +9,6 @@ use crate::model::review::ReviewStatus;
 pub struct Glyphs {
     pub reviewed: &'static str,
     pub unreviewed: &'static str,
-    pub changed: &'static str,
     pub folder_open: char,
     pub folder_closed: char,
     /// Prefix on error messages in the status bar.
@@ -29,7 +29,6 @@ impl Glyphs {
         Glyphs {
             reviewed: "[x]",
             unreviewed: "[ ]",
-            changed: "[!]",
             folder_open: 'v',
             folder_closed: '>',
             error: "!",
@@ -47,7 +46,6 @@ impl Glyphs {
             // frequently rendered double-width, so we avoid them.
             reviewed: "✓",
             unreviewed: "●",
-            changed: "!",
             folder_open: '▾',
             folder_closed: '▸',
             error: "!",
@@ -63,7 +61,6 @@ impl Glyphs {
         match status {
             ReviewStatus::Reviewed => self.reviewed,
             ReviewStatus::Unreviewed => self.unreviewed,
-            ReviewStatus::ChangedAfterReview => self.changed,
         }
     }
 }

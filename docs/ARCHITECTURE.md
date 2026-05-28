@@ -111,6 +111,9 @@ kind, with tab expansion (`unicode-width`).
 Panel heights are written back into `App` during render so scroll clamping and PageUp/Down
 (and Shift+arrows, which alias them) know the page size; the diff panel's left column
 (`diff_x`) is recorded too so mouse-wheel events route to the panel under the cursor.
+The sidebar width (`tree_width`) is user-adjustable with `<` / `>` keys and by
+left-click-dragging the divider column; the renderer clamps it to
+`[MIN_TREE_WIDTH, body_width - MIN_DIFF_WIDTH]` so neither panel can starve.
 
 Verified by in-memory `TestBackend` render tests in `ui/mod.rs`.
 
@@ -170,14 +173,16 @@ refinement if large single-file diffs ever stutter.
 ## Reviewed state
 
 Reviewed status is tied to a **diff hash**, not a filename, and is *derived* (never
-stored): no record → `Unreviewed ●`; record hash == current → `Reviewed ✓`; mismatch →
-`ChangedAfterReview ↻` (see `model/review.rs`). The hash is **seahash** — deterministic
-across processes, so a hash persisted one session still matches the next (the default
-randomly-seeded hashers would not). `r` hashes the already-hydrated diff locally (no git
-call); on refresh the git worker recomputes hashes for only the reviewed set, which is what
-flips a changed file to `↻`. Records persist to `.git/hunkr/review.json` via `persist.rs`
-(versioned `schema`; git dir resolved with `rev-parse --absolute-git-dir` for worktree
-correctness), loaded on startup, rewritten on each change.
+stored): a record whose hash matches the file's current diff hash → `Reviewed ✓`;
+everything else (no record, stale record, or unknown hash) → `Unreviewed ●` (see
+`model/review.rs`). The hash is **seahash** — deterministic across processes, so a hash
+persisted one session still matches the next (the default randomly-seeded hashers would
+not). `r` toggles the record — marking hashes the already-hydrated diff locally (no git
+call), unmarking drops the record; on refresh the git worker recomputes hashes for only the
+reviewed set, which is what makes a changed file fall back to unreviewed. Records persist
+to `.git/hunkr/review.json` via `persist.rs` (versioned `schema`; git dir resolved with
+`rev-parse --absolute-git-dir` for worktree correctness), loaded on startup, rewritten on
+each change.
 
 ## AI reference copy
 
@@ -200,9 +205,10 @@ coarse-resolution mtime; deleted files (no stat) are simply never cached.
 ## Glyphs
 
 All non-text markers (review status, folder arrows, error prefix, filter cursor, status-bar
-separators) come from one `Glyphs` set in `src/glyphs.rs`. The default is **ASCII-safe**
-(`[x]`/`[ ]`/`[!]`, `>`/`v`) so it renders in any terminal/font/tmux; `--unicode` swaps in
-`✓ ● ▸ ▾`. Every Unicode glyph in that set is chosen to be single-width in common fonts —
+separators) come from one `Glyphs` set in `src/glyphs.rs`. The default is **Unicode**
+(`✓ ● ▸ ▾`); `--ascii` swaps in a plain-text set (`[x]`/`[ ]`, `>`/`v`) for
+terminals/fonts that mis-render the symbols. Every Unicode glyph in that set is chosen to
+be single-width in common fonts —
 ones frequently rendered double-width (`↻`, `⚠`) are avoided, since a wide glyph swallows
 the following space and misaligns the row. The status bar measures text width
 (`unicode-width`) and only draws the right-aligned key hints when they fit, so they never
