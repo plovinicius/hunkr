@@ -158,8 +158,10 @@ diff refreshes on return.
 
 ## Hot reload
 
-An fs-watch thread (`src/watch.rs`: `notify`, recursive, **filtering `.git/`** to avoid an
-index/lock feedback loop, debounced ~150ms and coalesced) posts `Event::Fs`. The UI thread
+An fs-watch thread (`src/watch.rs`: `notify`, recursive, **filtering most of `.git/`**
+to avoid the index/lock feedback loop while still listening for `HEAD`/`refs/`/`packed-refs`/
+`ORIG_HEAD` so commits/checkouts/resets in another shell refresh the view, debounced
+~150ms and coalesced) posts `Event::Fs`. The UI thread
 forwards that to a git-worker thread (`event::spawn_git_worker`) which recomputes the
 changed-file snapshot off-thread and emits `Event::Refreshed`. `App::reconcile` matches
 files by path and preserves selection, scroll, and current hunk when the selected file's

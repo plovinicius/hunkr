@@ -3,9 +3,13 @@
 //! Watches the repo root recursively and posts a single debounced `Event::Fs`
 //! per burst of changes. Two things are essential:
 //!
-//! * **`.git/` is filtered out.** git rewrites its index/refs/lock files
-//!   constantly (including as a side effect of our own `git status`); watching
-//!   them would create an infinite refresh loop.
+//! * **Most of `.git/` is filtered out, but ref/HEAD updates are kept.** git
+//!   rewrites its index/lock files constantly (including as a side effect of
+//!   our own `git status`); watching them would create an infinite refresh
+//!   loop. We do let through changes to `HEAD`, `refs/`, `packed-refs`, and
+//!   `ORIG_HEAD` so that committing/checking-out/resetting in another tab
+//!   refreshes the view — those files don't move from a read-only `git
+//!   status`, so they can't feed back.
 //! * **Bursts are coalesced.** An AI agent rewriting many files fires a storm of
 //!   raw events; we collapse them into one refresh after a short quiet period.
 
@@ -70,11 +74,32 @@ pub fn spawn(repo_root: PathBuf, bus: Sender<Event>) -> Result<()> {
     Ok(())
 }
 
-/// An event matters only if it touches something outside `.git/`.
+/// An event matters if it touches the worktree, or one of the few `.git/`
+/// paths that signal a real state change (commit / checkout / reset / fetch).
 fn is_relevant(res: &notify::Result<notify::Event>, git_dir: &Path) -> bool {
     match res {
-        Ok(ev) => ev.paths.iter().any(|p| !p.starts_with(git_dir)),
+        Ok(ev) => ev.paths.iter().any(|p| is_relevant_path(p, git_dir)),
         Err(_) => false,
+    }
+}
+
+/// True if `p` is either outside `.git/` (a worktree change) or one of the
+/// inside-`.git/` files that flip on commit/checkout/reset but never on a
+/// passive `git status` read.
+fn is_relevant_path(p: &Path, git_dir: &Path) -> bool {
+    match p.strip_prefix(git_dir) {
+        // Worktree change: always interesting.
+        Err(_) => true,
+        // Inside .git/: only ref / HEAD updates qualify. Specifically,
+        // `.git/index` (+ `.lock`) and `.git/objects/` are excluded — they
+        // churn on every `git status`, which would create a feedback loop.
+        Ok(rel) => {
+            rel.starts_with("refs")
+                || matches!(
+                    rel.to_str(),
+                    Some("HEAD") | Some("ORIG_HEAD") | Some("packed-refs")
+                )
+        }
     }
 }
 
@@ -92,18 +117,30 @@ mod tests {
     }
 
     #[test]
-    fn ignores_git_internal_changes() {
+    fn ignores_index_and_lock_churn() {
         let git = Path::new("/repo/.git");
-        // git's own index/ref/lock churn must never trigger a refresh.
+        // `git status` itself touches these — watching them would loop.
         assert!(!is_relevant(&ev(&["/repo/.git/index"]), git));
-        assert!(!is_relevant(&ev(&["/repo/.git/refs/heads/main"]), git));
         assert!(!is_relevant(&ev(&["/repo/.git/index.lock"]), git));
+        assert!(!is_relevant(&ev(&["/repo/.git/objects/ab/cdef0123"]), git));
     }
 
     #[test]
     fn reacts_to_worktree_changes() {
         let git = Path::new("/repo/.git");
         assert!(is_relevant(&ev(&["/repo/src/main.rs"]), git));
+    }
+
+    #[test]
+    fn reacts_to_ref_and_head_updates() {
+        let git = Path::new("/repo/.git");
+        // Commit / checkout / reset / fetch all surface through these paths,
+        // and a passive `git status` never touches them.
+        assert!(is_relevant(&ev(&["/repo/.git/HEAD"]), git));
+        assert!(is_relevant(&ev(&["/repo/.git/refs/heads/main"]), git));
+        assert!(is_relevant(&ev(&["/repo/.git/refs/tags/v1"]), git));
+        assert!(is_relevant(&ev(&["/repo/.git/packed-refs"]), git));
+        assert!(is_relevant(&ev(&["/repo/.git/ORIG_HEAD"]), git));
     }
 
     #[test]
