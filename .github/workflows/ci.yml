@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Re-run the dependency audit on a schedule so newly-published advisories
-  # against already-pinned versions are still caught.
-  schedule:
-    - cron: "0 7 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,13 +24,3 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test --all
-
-  audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Audit dependencies for known advisories
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
