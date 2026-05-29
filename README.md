@@ -7,6 +7,8 @@ terminal or opening an IDE.
 
 It is **not** a git client: no commit, push, PR, or merge. Just review.
 
+![hunkr reviewing a diff](docs/preview.gif)
+
 ## The loop
 
 1. The AI edits files.
