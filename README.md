@@ -1,7 +1,7 @@
 # hunkr
 
 A fast, terminal-first **git diff reviewer built for AI coding workflows**. When an agent
-edits your code, `hunkr` lets you review the changes file-by-file and hunk-by-hunk, mark
+edits your code, `hunkr` lets you review the changes file-by-file and chunk-by-chunk, mark
 what you've checked, and copy an AI-ready reference back to the agent — without leaving the
 terminal or opening an IDE.
 
@@ -13,10 +13,10 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
 
 1. The AI edits files.
 2. `hunkr` auto-refreshes the diff (filesystem watch + off-thread git).
-3. You review file-by-file / hunk-by-hunk.
+3. You review file-by-file / chunk-by-chunk.
 4. Mark files reviewed (`r`). Reviewed state is tied to the file's diff hash, so if the
    file changes again it automatically falls back to unreviewed.
-5. Press `y` to copy an AI-ready reference for the current hunk and paste it back to the
+5. Press `y` to copy an AI-ready reference for the current chunk and paste it back to the
    agent.
 6. Repeat — never leaving the terminal.
 
@@ -59,14 +59,14 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `j` / `k` / arrows | move cursor / scroll diff       |
 | `Shift`+arrows / `PgUp` / `PgDn` | page up / down   |
 | mouse wheel | scroll diff (or move cursor over the tree) |
-| `n` / `p` | next / previous hunk                     |
+| `n` / `p` | next / previous chunk                     |
 | `]` / `[` | next / previous file                     |
 | `s`       | toggle unified / side-by-side diff       |
 | `g` / `G` | top / bottom of diff                     |
 | `Tab`     | switch tree / diff focus                 |
 | `Enter`   | expand-collapse folder / focus diff      |
 | `r`       | toggle reviewed                          |
-| `y`       | copy AI reference for the hunk           |
+| `y`       | copy AI reference for the chunk           |
 | `e`       | open the file in `$EDITOR` at the line   |
 | `/`       | filter files (`Esc` clears)              |
 | `?`       | help overlay                             |

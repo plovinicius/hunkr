@@ -31,9 +31,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 ReviewStatus::Unreviewed => unreviewed += 1,
             }
         }
-        let hunk = match &app.diff {
-            Some(fd) if !fd.hunks.is_empty() => {
-                format!("hunk {}/{}", app.current_hunk + 1, fd.hunks.len())
+        let chunk = match &app.diff {
+            Some(fd) if !fd.chunks.is_empty() => {
+                format!("chunk {}/{}", app.current_chunk + 1, fd.chunks.len())
             }
             _ => g.dash.to_string(),
         };
@@ -45,7 +45,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         // Each count is its own separator-delimited segment so the groups read
         // as evenly spaced regardless of glyph width.
         format!(
-            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{hunk}{filter}",
+            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{chunk}{filter}",
             g.reviewed, g.unreviewed,
         )
     };
@@ -53,7 +53,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hints = if app.mode == Mode::Filter {
         format!(" Enter apply{sep}Esc cancel ")
     } else {
-        format!(" n/p hunk{sep}s split{sep}r review{sep}y copy{sep}? help{sep}q quit ")
+        format!(" n/p chunk{sep}s split{sep}r review{sep}y copy{sep}? help{sep}q quit ")
     };
 
     // Background first, then the left text. The right-aligned hints are drawn

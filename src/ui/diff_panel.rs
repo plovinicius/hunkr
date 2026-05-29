@@ -18,14 +18,14 @@ use crate::render::{sanitize, viewport};
 /// Tab stop width used when expanding tabs for display.
 const TAB_WIDTH: usize = 4;
 
-/// Background fill behind the current hunk's header row — the brightest part of
+/// Background fill behind the current chunk's header row — the brightest part of
 /// the active block.
-const CURRENT_HUNK_HEADER_BG: Color = Color::Indexed(238);
-/// Subtler fill behind the current hunk's body rows, so the whole hunk reads as
+const CURRENT_CHUNK_HEADER_BG: Color = Color::Indexed(238);
+/// Subtler fill behind the current chunk's body rows, so the whole chunk reads as
 /// one active block without washing out the `+`/`-` colours.
-const CURRENT_HUNK_BODY_BG: Color = Color::Indexed(236);
-/// Colour of the left accent bar marking the current hunk's left edge.
-const CURRENT_HUNK_BAR: Color = Color::Yellow;
+const CURRENT_CHUNK_BODY_BG: Color = Color::Indexed(236);
+/// Colour of the left accent bar marking the current chunk's left edge.
+const CURRENT_CHUNK_BAR: Color = Color::Yellow;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Diff;
@@ -88,16 +88,16 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     for &row in &app.diff_rows[window] {
         match row {
             RowRef::Header(h) => {
-                let text = sanitize(fd.slice(&fd.hunks[h].header));
+                let text = sanitize(fd.slice(&fd.chunks[h].header));
                 lines.push(header_line(
                     &text,
-                    h == app.current_hunk,
+                    h == app.current_chunk,
                     &app.glyphs,
                     inner.width as usize,
                 ));
             }
             RowRef::Line(h, l) => {
-                let dl = &fd.hunks[h].lines[l];
+                let dl = &fd.chunks[h].lines[l];
                 let content = expand_tabs(fd.slice(&dl.text));
                 let (marker, color) = line_marker(dl.kind);
                 let gutter = format!(
@@ -106,7 +106,7 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                     fmt_no(dl.new_no)
                 );
                 lines.push(body_line(
-                    h == app.current_hunk,
+                    h == app.current_chunk,
                     gutter,
                     content,
                     color,
@@ -126,7 +126,7 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     if width < 4 {
         return;
     }
-    // Reserve one column for the current-hunk accent bar; the rest splits into
+    // Reserve one column for the current-chunk accent bar; the rest splits into
     // two equal columns separated by a single divider column.
     let content_w = width - 1;
     let left_w = (content_w - 1) / 2;
@@ -140,25 +140,25 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     for &row in &app.side_rows[window] {
         match row {
             SideRow::Header(h) => {
-                let text = sanitize(fd.slice(&fd.hunks[h].header));
+                let text = sanitize(fd.slice(&fd.chunks[h].header));
                 lines.push(header_line(
                     &text,
-                    h == app.current_hunk,
+                    h == app.current_chunk,
                     &app.glyphs,
                     width,
                 ));
             }
             SideRow::Pair { left, right } => {
-                let current = left.or(right).map(|(h, _)| h) == Some(app.current_hunk);
-                let lead = if current { app.glyphs.hunk_bar } else { ' ' };
+                let current = left.or(right).map(|(h, _)| h) == Some(app.current_chunk);
+                let lead = if current { app.glyphs.chunk_bar } else { ' ' };
                 let (lc, ls) = side_cell(fd, left, left_w, Side::Old);
                 let (rc, rs) = side_cell(fd, right, right_w, Side::New);
                 if current {
-                    let bg = CURRENT_HUNK_BODY_BG;
+                    let bg = CURRENT_CHUNK_BODY_BG;
                     lines.push(Line::from(vec![
                         Span::styled(
                             lead.to_string(),
-                            Style::default().fg(CURRENT_HUNK_BAR).bg(bg),
+                            Style::default().fg(CURRENT_CHUNK_BAR).bg(bg),
                         ),
                         Span::styled(lc, ls.bg(bg)),
                         Span::styled("│", divider.bg(bg)),
@@ -196,7 +196,7 @@ fn side_cell(
     let Some((h, l)) = cell else {
         return (" ".repeat(width), Style::default());
     };
-    let dl = &fd.hunks[h].lines[l];
+    let dl = &fd.chunks[h].lines[l];
     let (no, marker, color) = match side {
         Side::Old => (
             dl.old_no,
@@ -222,18 +222,18 @@ fn side_cell(
     (text, Style::default().fg(color))
 }
 
-/// Build a styled hunk-header line. The hunk the `n`/`p` cursor is on gets the
+/// Build a styled chunk-header line. The chunk the `n`/`p` cursor is on gets the
 /// accent bar, a contrasting colour, and a full-width background fill so it's
 /// obvious which change is selected; others keep a blank lead column so the
 /// header text doesn't shift as you navigate. The line is padded/truncated to
 /// `width` so the highlight fills the row.
 fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<'a> {
-    let lead = if current { g.hunk_bar } else { ' ' };
+    let lead = if current { g.chunk_bar } else { ' ' };
     let body = fit(&format!("{lead} {text}"), width);
     let style = if current {
         Style::default()
             .fg(Color::Yellow)
-            .bg(CURRENT_HUNK_HEADER_BG)
+            .bg(CURRENT_CHUNK_HEADER_BG)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -243,10 +243,10 @@ fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<
     Line::styled(body, style)
 }
 
-/// Build a styled unified body row. Rows inside the current hunk get the left
-/// accent bar and a subtle full-row background wash, so the whole hunk reads as
+/// Build a styled unified body row. Rows inside the current chunk get the left
+/// accent bar and a subtle full-row background wash, so the whole chunk reads as
 /// one active block. The leading bar column is present (as a blank) on every
-/// row so content stays vertically aligned as the cursor moves between hunks.
+/// row so content stays vertically aligned as the cursor moves between chunks.
 fn body_line<'a>(
     current: bool,
     gutter: String,
@@ -256,15 +256,15 @@ fn body_line<'a>(
     width: usize,
     dim: Style,
 ) -> Line<'a> {
-    let lead = if current { g.hunk_bar } else { ' ' };
+    let lead = if current { g.chunk_bar } else { ' ' };
     if current {
-        let bg = CURRENT_HUNK_BODY_BG;
+        let bg = CURRENT_CHUNK_BODY_BG;
         // Pad the content so the wash fills the row out to the right edge.
         let pad = width.saturating_sub(1 + gutter.width());
         Line::from(vec![
             Span::styled(
                 lead.to_string(),
-                Style::default().fg(CURRENT_HUNK_BAR).bg(bg),
+                Style::default().fg(CURRENT_CHUNK_BAR).bg(bg),
             ),
             Span::styled(gutter, dim.bg(bg)),
             Span::styled(fit(&content, pad), Style::default().fg(color).bg(bg)),

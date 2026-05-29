@@ -17,11 +17,11 @@ pub struct Glyphs {
     pub cursor: char,
     /// Separator between status-bar segments.
     pub sep: &'static str,
-    /// Placeholder when there's no current hunk.
+    /// Placeholder when there's no current chunk.
     pub dash: &'static str,
-    /// Left accent bar drawn down every row of the hunk the `n`/`p` cursor is
+    /// Left accent bar drawn down every row of the chunk the `n`/`p` cursor is
     /// currently on, marking the active block's left edge.
-    pub hunk_bar: char,
+    pub chunk_bar: char,
 }
 
 impl Glyphs {
@@ -35,7 +35,7 @@ impl Glyphs {
             cursor: '_',
             sep: " | ",
             dash: "-",
-            hunk_bar: '|',
+            chunk_bar: '|',
         }
     }
 
@@ -52,7 +52,7 @@ impl Glyphs {
             cursor: '│',
             sep: " · ",
             dash: "—",
-            hunk_bar: '▌',
+            chunk_bar: '▌',
         }
     }
 

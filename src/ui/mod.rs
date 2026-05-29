@@ -109,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_diff_hunk_and_lines() {
+    fn renders_diff_chunk_and_lines() {
         use crate::git::diff::parse_unified;
         use std::sync::Arc;
 
@@ -133,7 +133,7 @@ mod tests {
 
         assert!(
             text.contains("@@ -1,3 +1,3 @@"),
-            "hunk header missing:\n{text}"
+            "chunk header missing:\n{text}"
         );
         assert!(
             text.contains("keep this line"),
@@ -141,9 +141,9 @@ mod tests {
         );
         assert!(text.contains("remove me"), "deletion missing:\n{text}");
         assert!(text.contains("add me"), "addition missing:\n{text}");
-        // Diff panel title shows the file path; status bar shows hunk position.
+        // Diff panel title shows the file path; status bar shows chunk position.
         assert!(text.contains("foo.rs"), "diff title missing:\n{text}");
-        assert!(text.contains("hunk 1/1"), "hunk counter missing:\n{text}");
+        assert!(text.contains("chunk 1/1"), "chunk counter missing:\n{text}");
     }
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         use crate::git::diff::parse_unified;
         use std::sync::Arc;
 
-        // A repo can name a file — and contain diff lines / hunk context — with
+        // A repo can name a file — and contain diff lines / chunk context — with
         // raw ANSI/OSC escapes. None of it may reach the rendered buffer.
         let evil_path = "src/\x1b]0;pwned\x07evil.rs";
         let files = vec![ChangedFile::new(
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn current_hunk_header_is_marked() {
+    fn current_chunk_header_is_marked() {
         use crate::git::diff::parse_unified;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use std::sync::Arc;
@@ -204,7 +204,7 @@ mod tests {
         );
         app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
 
-        // Advance to the second hunk, as `n` does.
+        // Advance to the second chunk, as `n` does.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
         let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -213,14 +213,14 @@ mod tests {
 
         let first = text.lines().find(|l| l.contains("first")).unwrap();
         let second = text.lines().find(|l| l.contains("second")).unwrap();
-        // The current hunk's header carries the accent bar; the other doesn't.
+        // The current chunk's header carries the accent bar; the other doesn't.
         assert!(
             second.contains("▌ @@"),
-            "current hunk header should be marked:\n{text}"
+            "current chunk header should be marked:\n{text}"
         );
         assert!(
             !first.contains("▌ @@"),
-            "non-current hunk header should not be marked:\n{text}"
+            "non-current chunk header should not be marked:\n{text}"
         );
     }
 

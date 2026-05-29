@@ -19,7 +19,7 @@ use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
 use crate::model::{
-    diff::{FileDiff, Hunk, LineKind},
+    diff::{FileDiff, Chunk, LineKind},
     file::{ChangeKind, ChangedFile},
     snapshot::GitSnapshot,
     tree::FileTree,
@@ -85,8 +85,8 @@ pub enum ViewMode {
     SideBySide,
 }
 
-/// One rendered row of the unified diff: a hunk header or a body line
-/// `(hunk, line)`. Built once on hydration; the panel slices a window out.
+/// One rendered row of the unified diff: a chunk header or a body line
+/// `(chunk, line)`. Built once on hydration; the panel slices a window out.
 #[derive(Clone, Copy)]
 pub enum RowRef {
     Header(usize),
@@ -94,7 +94,7 @@ pub enum RowRef {
 }
 
 /// One rendered row of the side-by-side diff. `Pair` holds the old-side and
-/// new-side line references `(hunk, line)`; either may be absent when one side
+/// new-side line references `(chunk, line)`; either may be absent when one side
 /// has no corresponding line (a pure add or delete).
 #[derive(Clone, Copy)]
 pub enum SideRow {
@@ -119,19 +119,19 @@ pub struct App {
     pub diff: Option<Arc<FileDiff>>,
     /// Flattened render rows for `diff` (unified view).
     pub diff_rows: Vec<RowRef>,
-    /// Row index where each hunk's header sits in `diff_rows`.
-    pub hunk_starts: Vec<usize>,
+    /// Row index where each chunk's header sits in `diff_rows`.
+    pub chunk_starts: Vec<usize>,
     /// Flattened render rows for the side-by-side view.
     pub side_rows: Vec<SideRow>,
-    /// Row index where each hunk's header sits in `side_rows`.
-    pub side_hunk_starts: Vec<usize>,
+    /// Row index where each chunk's header sits in `side_rows`.
+    pub side_chunk_starts: Vec<usize>,
     /// Which file index `diff` belongs to, to avoid redundant reloads.
     pub diff_file: Option<usize>,
     /// LRU cache of parsed diffs, keyed by file signature.
     cache: DiffCache,
 
     pub scroll: usize,
-    pub current_hunk: usize,
+    pub current_chunk: usize,
 
     /// Persisted reviewed-state, keyed by path → diff hash at review time.
     pub review: ReviewStore,
@@ -209,13 +209,13 @@ impl App {
             tree_cursor: 0,
             diff: None,
             diff_rows: Vec::new(),
-            hunk_starts: Vec::new(),
+            chunk_starts: Vec::new(),
             side_rows: Vec::new(),
-            side_hunk_starts: Vec::new(),
+            side_chunk_starts: Vec::new(),
             diff_file: None,
             cache: DiffCache::new(DIFF_CACHE_CAP),
             scroll: 0,
-            current_hunk: 0,
+            current_chunk: 0,
             review,
             hashes: HashMap::new(),
             focus: Focus::Tree,
@@ -285,15 +285,15 @@ impl App {
 
     // ── AI reference ───────────────────────────────────────────────────────
 
-    /// Copy an AI-ready reference for the current hunk to the clipboard.
+    /// Copy an AI-ready reference for the current chunk to the clipboard.
     fn copy_reference(&mut self) {
         let text = match &self.diff {
-            Some(fd) if !fd.hunks.is_empty() => {
-                let h = self.current_hunk.min(fd.hunks.len() - 1);
-                crate::reference::build_hunk_reference(fd, h)
+            Some(fd) if !fd.chunks.is_empty() => {
+                let h = self.current_chunk.min(fd.chunks.len() - 1);
+                crate::reference::build_chunk_reference(fd, h)
             }
             _ => {
-                self.error = Some("no hunk to copy".into());
+                self.error = Some("no chunk to copy".into());
                 self.dirty = true;
                 return;
             }
@@ -336,17 +336,17 @@ impl App {
         let fd = self.diff.as_ref()?;
         match self.view {
             ViewMode::Unified => match self.diff_rows.get(self.scroll)? {
-                RowRef::Header(h) => first_line_no(&fd.hunks[*h]),
+                RowRef::Header(h) => first_line_no(&fd.chunks[*h]),
                 RowRef::Line(h, l) => {
-                    let dl = &fd.hunks[*h].lines[*l];
+                    let dl = &fd.chunks[*h].lines[*l];
                     dl.new_no.or(dl.old_no)
                 }
             },
             ViewMode::SideBySide => match self.side_rows.get(self.scroll)? {
-                SideRow::Header(h) => first_line_no(&fd.hunks[*h]),
+                SideRow::Header(h) => first_line_no(&fd.chunks[*h]),
                 SideRow::Pair { left, right } => right
-                    .and_then(|(h, l)| fd.hunks[h].lines[l].new_no)
-                    .or_else(|| left.and_then(|(h, l)| fd.hunks[h].lines[l].old_no)),
+                    .and_then(|(h, l)| fd.chunks[h].lines[l].new_no)
+                    .or_else(|| left.and_then(|(h, l)| fd.chunks[h].lines[l].old_no)),
             },
         }
     }
@@ -388,14 +388,14 @@ impl App {
     /// Apply a freshly computed snapshot, preserving as much of the user's
     /// place as possible: the selection stays on the same path (or snaps to the
     /// nearest file), and if the selected file's diff is byte-for-byte
-    /// unchanged we keep the exact scroll position and current hunk.
+    /// unchanged we keep the exact scroll position and current chunk.
     pub fn reconcile(&mut self, snapshot: GitSnapshot) {
         let prev_path = self
             .current_file_index()
             .map(|i| self.files[i].path.clone());
         let prev_text = self.diff.as_ref().map(|d| d.text.clone());
         let prev_scroll = self.scroll;
-        let prev_hunk = self.current_hunk;
+        let prev_chunk = self.current_chunk;
 
         // Adopt the worker's freshly computed hashes for reviewed files; this is
         // what flips a reviewed file back to unreviewed once it changes on disk.
@@ -417,7 +417,7 @@ impl App {
         {
             self.scroll =
                 viewport::clamp_offset(prev_scroll, self.diff_height.max(1), self.diff_rows.len());
-            self.current_hunk = prev_hunk.min(self.hunk_starts.len().saturating_sub(1));
+            self.current_chunk = prev_chunk.min(self.chunk_starts.len().saturating_sub(1));
         }
         self.dirty = true;
     }
@@ -522,16 +522,16 @@ impl App {
         self.diff = Some(diff);
         self.diff_file = Some(fi);
         self.scroll = 0;
-        self.current_hunk = 0;
+        self.current_chunk = 0;
         self.error = None;
     }
 
     fn clear_diff(&mut self) {
         self.diff = None;
         self.diff_rows.clear();
-        self.hunk_starts.clear();
+        self.chunk_starts.clear();
         self.side_rows.clear();
-        self.side_hunk_starts.clear();
+        self.side_chunk_starts.clear();
     }
 
     /// Inject an already-parsed diff (rendering tests use this to exercise the
@@ -548,20 +548,20 @@ impl App {
     fn rebuild_rows(&mut self, fd: &FileDiff) {
         // Unified rows: header followed by each body line.
         let mut rows = Vec::new();
-        let mut starts = Vec::with_capacity(fd.hunks.len());
-        for (h, hunk) in fd.hunks.iter().enumerate() {
+        let mut starts = Vec::with_capacity(fd.chunks.len());
+        for (h, chunk) in fd.chunks.iter().enumerate() {
             starts.push(rows.len());
             rows.push(RowRef::Header(h));
-            for l in 0..hunk.lines.len() {
+            for l in 0..chunk.lines.len() {
                 rows.push(RowRef::Line(h, l));
             }
         }
         self.diff_rows = rows;
-        self.hunk_starts = starts;
+        self.chunk_starts = starts;
 
         let (side_rows, side_starts) = build_side_rows(fd);
         self.side_rows = side_rows;
-        self.side_hunk_starts = side_starts;
+        self.side_chunk_starts = side_starts;
     }
 
     // ── navigation ───────────────────────────────────────────────────────
@@ -634,21 +634,21 @@ impl App {
         }
     }
 
-    /// Per-hunk header row indices for the active view.
-    fn active_hunk_starts(&self) -> &[usize] {
+    /// Per-chunk header row indices for the active view.
+    fn active_chunk_starts(&self) -> &[usize] {
         match self.view {
-            ViewMode::Unified => &self.hunk_starts,
-            ViewMode::SideBySide => &self.side_hunk_starts,
+            ViewMode::Unified => &self.chunk_starts,
+            ViewMode::SideBySide => &self.side_chunk_starts,
         }
     }
 
-    /// Toggle unified ↔ side-by-side, keeping the current hunk in view.
+    /// Toggle unified ↔ side-by-side, keeping the current chunk in view.
     fn toggle_view(&mut self) {
         self.view = match self.view {
             ViewMode::Unified => ViewMode::SideBySide,
             ViewMode::SideBySide => ViewMode::Unified,
         };
-        self.scroll_to_current_hunk();
+        self.scroll_to_current_chunk();
         self.dirty = true;
     }
 
@@ -665,29 +665,29 @@ impl App {
         };
         self.scroll =
             viewport::clamp_offset(target, self.diff_height.max(1), self.active_row_count());
-        self.sync_hunk_from_scroll();
+        self.sync_chunk_from_scroll();
         self.dirty = true;
     }
 
-    fn next_hunk(&mut self) {
-        let n = self.active_hunk_starts().len();
+    fn next_chunk(&mut self) {
+        let n = self.active_chunk_starts().len();
         if n == 0 {
             return;
         }
-        self.current_hunk = (self.current_hunk + 1).min(n - 1);
-        self.scroll_to_current_hunk();
+        self.current_chunk = (self.current_chunk + 1).min(n - 1);
+        self.scroll_to_current_chunk();
     }
 
-    fn prev_hunk(&mut self) {
-        if self.active_hunk_starts().is_empty() {
+    fn prev_chunk(&mut self) {
+        if self.active_chunk_starts().is_empty() {
             return;
         }
-        self.current_hunk = self.current_hunk.saturating_sub(1);
-        self.scroll_to_current_hunk();
+        self.current_chunk = self.current_chunk.saturating_sub(1);
+        self.scroll_to_current_chunk();
     }
 
-    fn scroll_to_current_hunk(&mut self) {
-        let row = self.active_hunk_starts().get(self.current_hunk).copied();
+    fn scroll_to_current_chunk(&mut self) {
+        let row = self.active_chunk_starts().get(self.current_chunk).copied();
         if let Some(row) = row {
             self.scroll =
                 viewport::clamp_offset(row, self.diff_height.max(1), self.active_row_count());
@@ -695,19 +695,19 @@ impl App {
         self.dirty = true;
     }
 
-    /// Keep `current_hunk` in sync after free scrolling: the active hunk is the
+    /// Keep `current_chunk` in sync after free scrolling: the active chunk is the
     /// last one whose header is at or above the top of the viewport.
-    fn sync_hunk_from_scroll(&mut self) {
+    fn sync_chunk_from_scroll(&mut self) {
         let scroll = self.scroll;
         let mut h = 0;
-        for (i, &start) in self.active_hunk_starts().iter().enumerate() {
+        for (i, &start) in self.active_chunk_starts().iter().enumerate() {
             if start <= scroll {
                 h = i;
             } else {
                 break;
             }
         }
-        self.current_hunk = h;
+        self.current_chunk = h;
     }
 
     // ── sidebar resize ─────────────────────────────────────────────────────
@@ -875,8 +875,8 @@ impl App {
                 Focus::Tree => self.cursor_up(),
                 Focus::Diff => self.scroll_by(-1),
             },
-            (KeyCode::Char('n'), _) => self.next_hunk(),
-            (KeyCode::Char('p'), _) => self.prev_hunk(),
+            (KeyCode::Char('n'), _) => self.next_chunk(),
+            (KeyCode::Char('p'), _) => self.prev_chunk(),
             (KeyCode::Char('s'), _) => self.toggle_view(),
             (KeyCode::Char('r'), _) => self.toggle_reviewed(),
             (KeyCode::Char('y'), _) => self.copy_reference(),
@@ -887,12 +887,12 @@ impl App {
             (KeyCode::Char('>'), _) => self.widen_tree(),
             (KeyCode::Char('g'), _) => {
                 self.scroll = 0;
-                self.sync_hunk_from_scroll();
+                self.sync_chunk_from_scroll();
                 self.dirty = true;
             }
             (KeyCode::Char('G'), _) => {
                 self.scroll = self.max_scroll();
-                self.sync_hunk_from_scroll();
+                self.sync_chunk_from_scroll();
                 self.dirty = true;
             }
             (KeyCode::Enter, _) => self.activate(),
@@ -901,28 +901,28 @@ impl App {
     }
 }
 
-/// The first meaningful line number of a hunk: the first line carrying a
+/// The first meaningful line number of a chunk: the first line carrying a
 /// new-file number, else the first old-file number, else `None`.
-fn first_line_no(hunk: &Hunk) -> Option<u32> {
-    hunk.lines
+fn first_line_no(chunk: &Chunk) -> Option<u32> {
+    chunk.lines
         .iter()
         .find_map(|l| l.new_no)
-        .or_else(|| hunk.lines.iter().find_map(|l| l.old_no))
+        .or_else(|| chunk.lines.iter().find_map(|l| l.old_no))
 }
 
-/// Transform a parsed diff into side-by-side rows. Within each hunk, context
+/// Transform a parsed diff into side-by-side rows. Within each chunk, context
 /// lines appear on both sides; a run of deletions is paired row-for-row with
 /// the run of additions that follows it (extra lines on either side get an
-/// empty cell on the other). Returns the rows and each hunk header's row index.
+/// empty cell on the other). Returns the rows and each chunk header's row index.
 fn build_side_rows(fd: &FileDiff) -> (Vec<SideRow>, Vec<usize>) {
     let mut rows = Vec::new();
-    let mut starts = Vec::with_capacity(fd.hunks.len());
+    let mut starts = Vec::with_capacity(fd.chunks.len());
 
-    for (h, hunk) in fd.hunks.iter().enumerate() {
+    for (h, chunk) in fd.chunks.iter().enumerate() {
         starts.push(rows.len());
         rows.push(SideRow::Header(h));
 
-        let lines = &hunk.lines;
+        let lines = &chunk.lines;
         let mut i = 0;
         while i < lines.len() {
             match lines[i].kind {
@@ -1083,7 +1083,7 @@ mod tests {
         a.on_key(key('e'));
         let req = a.take_editor_request().expect("expected an editor request");
         assert_eq!(req.path, PathBuf::from("src/foo.rs"));
-        // Top of the viewport is the hunk header → first new-file line is 20.
+        // Top of the viewport is the chunk header → first new-file line is 20.
         assert_eq!(req.line, 20);
     }
 

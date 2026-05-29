@@ -19,7 +19,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   - lazy per-file `git diff` fetch on selection (tracked + untracked + empty-tree base)
   - unified-diff parser → byte-range-backed `FileDiff`
   - virtualized stacked rendering (visible window only)
-  - `n`/`p` hunk nav, `j`/`k` + `g`/`G` + PageUp/Down scroll, `]`/`[` file nav
+  - `n`/`p` chunk nav, `j`/`k` + `g`/`G` + PageUp/Down scroll, `]`/`[` file nav
 
 ## Phase B — full MVP
 
@@ -28,7 +28,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
     and ~150ms debounce/coalesce (`src/watch.rs`)
   - off-thread git worker (`event::spawn_git_worker`) recomputes the snapshot so the UI
     thread never blocks on git; requests coalesce
-  - `App::reconcile` preserves selection by path and keeps exact scroll + current hunk
+  - `App::reconcile` preserves selection by path and keeps exact scroll + current chunk
     when the selected file's diff is byte-for-byte unchanged
 - ✅ **M4 — Reviewed state**
   - `r` toggles reviewed; status tied to a **deterministic diff hash** (seahash) so a
@@ -37,7 +37,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   - tree shows `✓ ●` glyphs; status bar shows review counts
   - current hashes recomputed off-thread for only the (small) reviewed set on refresh
 - ✅ **M5 — AI reference copy**
-  - `y` builds an AI-ready prompt for the current hunk (File / Change # / Lines / fenced
+  - `y` builds an AI-ready prompt for the current chunk (File / Change # / Lines / fenced
     `diff` snippet / `Issue:` slot) — `src/reference.rs`
   - copies via `arboard`, falling back to an OSC 52 escape (built-in base64) for tmux/SSH;
     status bar reports which path was used
@@ -62,7 +62,7 @@ reviewed state → AI reference copy, with file filter and help.
 
 ## Later (not MVP)
 
-Syntax highlighting · minimap · revert/accept-reject hunk ·
+Syntax highlighting · minimap · revert/accept-reject chunk ·
 inline AI comments · session history · multi-repo · daemon mode ·
 performance telemetry · config-file keybindings.
 

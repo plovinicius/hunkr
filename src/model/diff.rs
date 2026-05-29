@@ -1,7 +1,7 @@
 //! Structured, byte-range-backed representation of a single file's diff.
 //!
 //! Memory strategy: the entire `git diff` output for the file is stored **once**
-//! as an `Arc<str>`. Every [`DiffLine`] and hunk header is just a `Range<usize>`
+//! as an `Arc<str>`. Every [`DiffLine`] and chunk header is just a `Range<usize>`
 //! into that backing string — no per-line allocation. Rendering slices the
 //! backing text on demand for the visible window only (see `ui::diff_panel`).
 
@@ -18,7 +18,7 @@ pub enum LineKind {
     NoNewline,
 }
 
-/// A single rendered line of a hunk. `text` excludes the leading `+`/`-`/` `
+/// A single rendered line of a chunk. `text` excludes the leading `+`/`-`/` `
 /// marker (we draw our own gutter), except for [`LineKind::NoNewline`].
 #[derive(Debug, Clone)]
 pub struct DiffLine {
@@ -28,9 +28,9 @@ pub struct DiffLine {
     pub text: Range<usize>,
 }
 
-/// A `@@ ... @@` hunk and its lines.
+/// A `@@ ... @@` chunk and its lines.
 #[derive(Debug, Clone)]
-pub struct Hunk {
+pub struct Chunk {
     /// Range of the `@@ -a,b +c,d @@ ...` header line in the backing text.
     pub header: Range<usize>,
     pub lines: Vec<DiffLine>,
@@ -42,7 +42,7 @@ pub struct FileDiff {
     pub path: PathBuf,
     /// The complete `git diff` output, owned once.
     pub text: Arc<str>,
-    pub hunks: Vec<Hunk>,
+    pub chunks: Vec<Chunk>,
     pub is_binary: bool,
 }
 
@@ -53,7 +53,7 @@ impl FileDiff {
     }
 
     pub fn additions(&self) -> u32 {
-        self.hunks
+        self.chunks
             .iter()
             .flat_map(|h| &h.lines)
             .filter(|l| l.kind == LineKind::Add)
@@ -61,7 +61,7 @@ impl FileDiff {
     }
 
     pub fn deletions(&self) -> u32 {
-        self.hunks
+        self.chunks
             .iter()
             .flat_map(|h| &h.lines)
             .filter(|l| l.kind == LineKind::Del)

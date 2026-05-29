@@ -1,10 +1,10 @@
 //! AI reference generation + clipboard copy.
 //!
-//! Builds a compact `path:line` reference for the hunk under the cursor and
+//! Builds a compact `path:line` reference for the chunk under the cursor and
 //! copies it to the clipboard, so it can be pasted straight back to a coding
 //! agent that resolves it against the working tree. We deliberately omit the
 //! diff snippet: an agent with repo access reads the live file at those lines,
-//! which is cheaper than shipping the hunk and immune to a stale snippet. Copy
+//! which is cheaper than shipping the chunk and immune to a stale snippet. Copy
 //! prefers the system clipboard (`arboard`, reliable locally) and falls back to
 //! an OSC 52 terminal escape so it still works over tmux/SSH.
 
@@ -12,13 +12,13 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 
-use crate::model::diff::{FileDiff, Hunk};
+use crate::model::diff::{FileDiff, Chunk};
 
-/// Build the AI-ready reference for hunk `hunk_index` of `fd`: a compact
-/// `path:start-end` pointer (collapsed to `path:line` when the hunk touches a
+/// Build the AI-ready reference for chunk `chunk_index` of `fd`: a compact
+/// `path:start-end` pointer (collapsed to `path:line` when the chunk touches a
 /// single line) that an agent resolves against the working tree.
-pub fn build_hunk_reference(fd: &FileDiff, hunk_index: usize) -> String {
-    let (start, end) = new_line_range(&fd.hunks[hunk_index]);
+pub fn build_chunk_reference(fd: &FileDiff, chunk_index: usize) -> String {
+    let (start, end) = new_line_range(&fd.chunks[chunk_index]);
     let path = fd.path.display();
     if start == end {
         format!("{path}:{start}")
@@ -27,11 +27,11 @@ pub fn build_hunk_reference(fd: &FileDiff, hunk_index: usize) -> String {
     }
 }
 
-/// The new-file line range the hunk touches (falls back to old-file numbers for
-/// a pure-deletion hunk).
-fn new_line_range(hunk: &Hunk) -> (u32, u32) {
+/// The new-file line range the chunk touches (falls back to old-file numbers for
+/// a pure-deletion chunk).
+fn new_line_range(chunk: &Chunk) -> (u32, u32) {
     let pick = |f: fn(&crate::model::diff::DiffLine) -> Option<u32>| {
-        let nums: Vec<u32> = hunk.lines.iter().filter_map(f).collect();
+        let nums: Vec<u32> = chunk.lines.iter().filter_map(f).collect();
         match (nums.iter().min(), nums.iter().max()) {
             (Some(&lo), Some(&hi)) => Some((lo, hi)),
             _ => None,
@@ -123,13 +123,13 @@ mod tests {
             "+extra\n",
         );
         // New-file line numbers present are 10 (keep), 11 (new), 12 (extra).
-        assert_eq!(build_hunk_reference(&diff(raw), 0), "src/foo.rs:10-12");
+        assert_eq!(build_chunk_reference(&diff(raw), 0), "src/foo.rs:10-12");
     }
 
     #[test]
     fn single_line_reference_omits_the_range() {
         let raw = concat!("@@ -5,1 +5,1 @@\n", "-before\n", "+after\n");
-        assert_eq!(build_hunk_reference(&diff(raw), 0), "src/foo.rs:5");
+        assert_eq!(build_chunk_reference(&diff(raw), 0), "src/foo.rs:5");
     }
 
     #[test]

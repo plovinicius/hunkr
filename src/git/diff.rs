@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::git::command;
-use crate::model::diff::{DiffLine, FileDiff, Hunk, LineKind};
+use crate::model::diff::{DiffLine, FileDiff, Chunk, LineKind};
 use crate::model::file::ChangedFile;
 
 /// The left-hand side of the diff. Normally `HEAD`; when the repo has no
@@ -112,11 +112,11 @@ pub fn diff_hashes_for<'a>(
 
 /// Parse unified-diff `text` into a [`FileDiff`]. Header preamble lines
 /// (`diff --git`, `index`, `---`, `+++`, mode lines) before the first `@@` are
-/// skipped; only hunk bodies are retained.
+/// skipped; only chunk bodies are retained.
 pub fn parse_unified(text: Arc<str>, path: PathBuf) -> FileDiff {
     let s: &str = &text;
-    let mut hunks: Vec<Hunk> = Vec::new();
-    let mut cur: Option<Hunk> = None;
+    let mut chunks: Vec<Chunk> = Vec::new();
+    let mut cur: Option<Chunk> = None;
     let mut old_no = 0u32;
     let mut new_no = 0u32;
     let mut is_binary = false;
@@ -131,12 +131,12 @@ pub fn parse_unified(text: Arc<str>, path: PathBuf) -> FileDiff {
 
         if content.starts_with("@@") {
             if let Some(h) = cur.take() {
-                hunks.push(h);
+                chunks.push(h);
             }
-            let (os, ns) = parse_hunk_header(content);
+            let (os, ns) = parse_chunk_header(content);
             old_no = os;
             new_no = ns;
-            cur = Some(Hunk {
+            cur = Some(Chunk {
                 header: start..end,
                 lines: Vec::new(),
             });
@@ -181,27 +181,27 @@ pub fn parse_unified(text: Arc<str>, path: PathBuf) -> FileDiff {
                         text: start..end,
                     });
                 }
-                _ => {} // blank/unexpected line inside a hunk
+                _ => {} // blank/unexpected line inside a chunk
             }
         }
-        // else: preamble before the first hunk → skip
+        // else: preamble before the first chunk → skip
     }
     if let Some(h) = cur.take() {
-        hunks.push(h);
+        chunks.push(h);
     }
 
     FileDiff {
         path,
         text,
-        hunks,
+        chunks,
         is_binary,
     }
 }
 
-/// Parse the `-old_start[,n]` / `+new_start[,n]` fields of a hunk header,
+/// Parse the `-old_start[,n]` / `+new_start[,n]` fields of a chunk header,
 /// returning the starting line numbers. Only looks inside the `@@ ... @@`
 /// delimiters so a trailing function-context string can't confuse it.
-fn parse_hunk_header(h: &str) -> (u32, u32) {
+fn parse_chunk_header(h: &str) -> (u32, u32) {
     let after = h.strip_prefix("@@").unwrap_or(h);
     let core = match after.find("@@") {
         Some(i) => &after[..i],
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_hunks_and_line_numbers() {
+    fn parses_chunks_and_line_numbers() {
         // `concat!` (not `\`-continuation) so the leading space on context
         // lines is preserved exactly as git emits it.
         let raw = concat!(
@@ -252,8 +252,8 @@ mod tests {
             " ctx four\n",
         );
         let d = parse(raw);
-        assert_eq!(d.hunks.len(), 1);
-        let h = &d.hunks[0];
+        assert_eq!(d.chunks.len(), 1);
+        let h = &d.chunks[0];
         assert_eq!(h.lines.len(), 5);
         // First context line keeps both numbers starting at 1.
         assert_eq!(h.lines[0].old_no, Some(1));
@@ -271,14 +271,14 @@ mod tests {
         let raw = "diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n";
         let d = parse(raw);
         assert!(d.is_binary);
-        assert!(d.hunks.is_empty());
+        assert!(d.chunks.is_empty());
     }
 
     #[test]
-    fn handles_multiple_hunks() {
+    fn handles_multiple_chunks() {
         let raw = "@@ -1,1 +1,1 @@\n-a\n+b\n@@ -10,1 +10,1 @@\n-c\n+d\n";
         let d = parse(raw);
-        assert_eq!(d.hunks.len(), 2);
-        assert_eq!(d.hunks[1].lines[0].old_no, Some(10));
+        assert_eq!(d.chunks.len(), 2);
+        assert_eq!(d.chunks[1].lines[0].old_no, Some(10));
     }
 }

@@ -2,7 +2,7 @@ pub mod viewport;
 
 /// Replace control characters with the Unicode replacement char (`U+FFFD`).
 ///
-/// Repo-derived strings — file paths, diff text, hunk-header context — are
+/// Repo-derived strings — file paths, diff text, chunk-header context — are
 /// untrusted: a file can be named, or contain a line, with embedded ANSI/OSC
 /// escape sequences (git allows any byte but NUL and `/` in a path). Some
 /// render paths write a cell's symbol to the terminal verbatim, so a raw `ESC`

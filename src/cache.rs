@@ -91,7 +91,7 @@ mod tests {
         Arc::new(FileDiff {
             path: PathBuf::from("x"),
             text: Arc::from(""),
-            hunks: Vec::new(),
+            chunks: Vec::new(),
             is_binary: false,
         })
     }

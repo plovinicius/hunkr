@@ -2,9 +2,9 @@
 
 `hunkr` is a terminal-first git diff reviewer built for the AI coding loop:
 
-> AI edits files → the diff auto-refreshes → you review file-by-file / hunk-by-hunk →
+> AI edits files → the diff auto-refreshes → you review file-by-file / chunk-by-chunk →
 > mark files reviewed → reviewed state clears automatically when a file changes again →
-> copy an AI-friendly reference for a hunk → repeat — without leaving the terminal.
+> copy an AI-friendly reference for a chunk → repeat — without leaving the terminal.
 
 It is **not** a git client: no commit/push/PR/merge/host integration. Just review.
 
@@ -49,7 +49,7 @@ git/
   diff.rs        DiffBase + fetch_file_diff + parse_unified → FileDiff
 model/
   file.rs        ChangedFile, ChangeKind
-  diff.rs        FileDiff, Hunk, DiffLine (byte-range backed)
+  diff.rs        FileDiff, Chunk, DiffLine (byte-range backed)
   tree.rs        arena FileTree (folder grouping, collapse/expand, flattened visible list)
 render/
   viewport.rs    virtualization math (clamp_offset / visible_range)
@@ -65,21 +65,21 @@ ui/
 ## Data model
 
 Memory strategy: each file's full `git diff` output is stored **once** as `Arc<str>`;
-every `DiffLine` and hunk header is a `Range<usize>` into that backing string — no
+every `DiffLine` and chunk header is a `Range<usize>` into that backing string — no
 per-line allocation. Only the **selected** file's diff is hydrated; the rest stay as
 lightweight `ChangedFile` metadata. The tree is an **arena** (`Vec<TreeNode>` referenced
 by index — no `Rc`/pointers).
 
 - `ChangedFile { path, kind: ChangeKind, additions, deletions }` — one tree row.
-- `FileDiff { path, text: Arc<str>, hunks, is_binary }`.
-- `Hunk { header: Range, lines: Vec<DiffLine> }`.
+- `FileDiff { path, text: Arc<str>, chunks, is_binary }`.
+- `Chunk { header: Range, lines: Vec<DiffLine> }`.
 - `DiffLine { kind, old_no, new_no, text: Range }` (`text` excludes the `+`/`-`/` ` marker).
 - `FileTree { nodes: Vec<TreeNode>, root, visible: Vec<usize> }`; `visible` is the
   flattened, in-order list of on-screen node indices given collapsed state.
 - `App` owns `files`, `tree`, `tree_cursor`, the hydrated `diff` + its flattened
-  `diff_rows` / `hunk_starts`, `scroll`, `current_hunk`, `focus`, and dirty/quit flags.
+  `diff_rows` / `chunk_starts`, `scroll`, `current_chunk`, `focus`, and dirty/quit flags.
 
-`RowRef` (`Header(hunk)` | `Line(hunk, line)`) is the flattened render-row index built
+`RowRef` (`Header(chunk)` | `Line(chunk, line)`) is the flattened render-row index built
 once on hydration; the diff panel slices a window out of it.
 
 ---
@@ -96,7 +96,7 @@ once on hydration; the diff panel slices a window out of it.
   <base> -- <path>`; untracked → `git diff --no-index -- /dev/null <path>` (exit code 1 is
   expected and tolerated).
 - **Parser:** a line-by-line state machine; preamble before the first `@@` is skipped,
-  hunk bodies retained, line numbers tracked, binary diffs flagged. Cost is O(diff size),
+  chunk bodies retained, line numbers tracked, binary diffs flagged. Cost is O(diff size),
   bounded by *what changed* — a huge file with a small edit parses instantly.
 
 ---
@@ -104,7 +104,7 @@ once on hydration; the diff panel slices a window out of it.
 ## Rendering & virtualization
 
 The diff panel computes `viewport::visible_range(scroll, height, total)` and renders only
-those `diff_rows` into `Line`s each frame. Headers render bold cyan — except the hunk the
+those `diff_rows` into `Line`s each frame. Headers render bold cyan — except the chunk the
 `n`/`p` cursor is on, which gets a marker, yellow text, and a full-width background fill so
 the current change is obvious; lines render with an `old new ± ` gutter, green/red/gray by
 kind, with tab expansion (`unicode-width`).
@@ -164,7 +164,7 @@ to avoid the index/lock feedback loop while still listening for `HEAD`/`refs/`/`
 ~150ms and coalesced) posts `Event::Fs`. The UI thread
 forwards that to a git-worker thread (`event::spawn_git_worker`) which recomputes the
 changed-file snapshot off-thread and emits `Event::Refreshed`. `App::reconcile` matches
-files by path and preserves selection, scroll, and current hunk when the selected file's
+files by path and preserves selection, scroll, and current chunk when the selected file's
 diff is byte-for-byte unchanged; otherwise it re-hydrates and clamps. This off-thread
 design is what makes refresh feel instant — the UI thread never blocks on `git`.
 
@@ -188,11 +188,11 @@ each change.
 
 ## AI reference copy
 
-`y` on a hunk builds an AI-ready prompt (file, change #, new-file line range, the exact
+`y` on a chunk builds an AI-ready prompt (file, change #, new-file line range, the exact
 raw diff snippet, and an `Issue:` slot) in `src/reference.rs` and copies it via `arboard`,
 falling back to an **OSC 52** terminal escape (with a built-in base64 encoder) so it works
 over tmux/SSH where there's no local display. The status bar reports which path was used.
-The line range is derived from the hunk's actual line numbers; the snippet is sliced
+The line range is derived from the chunk's actual line numbers; the snippet is sliced
 byte-for-byte from the backing diff text.
 
 ## Caching
@@ -222,7 +222,7 @@ clobber the left-side counts on a narrow terminal.
 On hydration the diff is flattened into **both** a unified row list (`diff_rows`) and a
 side-by-side row list (`side_rows`, built by `build_side_rows`, which pairs each run of
 deletions with the additions that follow it). Navigation/scroll operate on whichever list
-is active via `active_row_count`/`active_hunk_starts`, and both render paths are virtualized
+is active via `active_row_count`/`active_chunk_starts`, and both render paths are virtualized
 to the visible window. The side-by-side renderer truncates/pads each column to a fixed width
 (`unicode-width`) so the two sides stay aligned.
 
