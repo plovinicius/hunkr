@@ -94,9 +94,9 @@ mod tests {
         );
         assert!(text.contains("README.md"), "file row missing:\n{text}");
         assert!(text.contains("src"), "folder row missing:\n{text}");
-        // Default glyphs are Unicode: unreviewed ● and an (A) kind tag.
+        // Default glyphs are Unicode: unreviewed ● and a (+) added kind tag.
         assert!(text.contains("●"), "unreviewed glyph missing:\n{text}");
-        assert!(text.contains("(A)"), "added kind tag missing:\n{text}");
+        assert!(text.contains("(+)"), "added kind tag missing:\n{text}");
         // No file selected → diff panel shows its placeholder.
         assert!(
             text.contains("Select a file"),

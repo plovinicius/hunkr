@@ -2,6 +2,14 @@
 name = "hunkr"
 version = "0.1.0"
 edition = "2024"
+description = "A fast, terminal-first git diff reviewer built for AI coding workflows"
+authors = ["Paulo Pinheiro <ploviniciusplo@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/plovinicius/hunkr"
+homepage = "https://github.com/plovinicius/hunkr"
+readme = "README.md"
+keywords = ["git", "diff", "tui", "review", "ai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"

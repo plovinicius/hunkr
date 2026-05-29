@@ -18,13 +18,29 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
    agent.
 6. Repeat — never leaving the terminal.
 
-## Install & run
+## Install
 
 ```sh
-cargo run                  # review the repo in the current directory
-cargo run -- PATH          # review the repo containing PATH
-cargo run -- --ascii       # force ASCII icons ([x] [ ] v >) instead of Unicode
+cargo install --git https://github.com/plovinicius/hunkr   # install the `hunkr` binary
 ```
+
+Or build from a clone:
+
+```sh
+git clone https://github.com/plovinicius/hunkr
+cd hunkr
+cargo install --path .
+```
+
+## Run
+
+```sh
+hunkr                      # review the repo in the current directory
+hunkr PATH                 # review the repo containing PATH
+hunkr --ascii              # force ASCII icons ([x] [ ] v >) instead of Unicode
+```
+
+During development you can use `cargo run -- …` in place of the installed binary.
 
 Icons are Unicode by default (`✓` reviewed, `●` unreviewed, `▸`/`▾` folders); pass
 `--ascii` for a plain-text set (`[x]`, `[ ]`, `>`/`v`) if your terminal/font mis-renders
@@ -64,3 +80,11 @@ Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH. `
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design, data model, rendering, hot
   reload, caching.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestones and status.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in this
+project by you shall be dual licensed as above, without any additional terms or
+conditions.
