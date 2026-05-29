@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 use crate::model::review::ReviewStatus;
+use crate::render::sanitize;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let bar = Style::default().bg(Color::Indexed(236)).fg(Color::Gray);
@@ -18,9 +19,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         // Live filter editing, with a block cursor.
         format!(" filter: {}{}", app.filter, g.cursor)
     } else if let Some(err) = &app.error {
-        format!(" {} {err}", g.error)
+        // Errors can echo untrusted paths from git; strip control bytes.
+        format!(" {} {}", g.error, sanitize(err))
     } else if let Some(msg) = &app.status_msg {
-        format!(" {msg}")
+        format!(" {}", sanitize(msg))
     } else {
         let (mut reviewed, mut unreviewed) = (0u32, 0u32);
         for i in 0..app.files.len() {

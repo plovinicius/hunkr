@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Focus, RowRef, SideRow, ViewMode};
 use crate::glyphs::Glyphs;
 use crate::model::diff::{FileDiff, LineKind};
-use crate::render::viewport;
+use crate::render::{sanitize, viewport};
 
 /// Tab stop width used when expanding tabs for display.
 const TAB_WIDTH: usize = 4;
@@ -35,7 +35,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let title = match &app.diff {
-        Some(fd) => format!(" {} [{mode}] ", fd.path.display()),
+        // The path is untrusted (a repo can name a file with embedded escape
+        // sequences) and the Block-title render path writes cell symbols
+        // verbatim, so sanitize before it reaches the terminal.
+        Some(fd) => format!(" {} [{mode}] ", sanitize(&fd.path.display().to_string())),
         None => " diff ".to_string(),
     };
     let block = Block::default()
@@ -85,9 +88,9 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     for &row in &app.diff_rows[window] {
         match row {
             RowRef::Header(h) => {
-                let text = fd.slice(&fd.hunks[h].header);
+                let text = sanitize(fd.slice(&fd.hunks[h].header));
                 lines.push(header_line(
-                    text,
+                    &text,
                     h == app.current_hunk,
                     &app.glyphs,
                     inner.width as usize,
@@ -137,8 +140,13 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     for &row in &app.side_rows[window] {
         match row {
             SideRow::Header(h) => {
-                let text = fd.slice(&fd.hunks[h].header);
-                lines.push(header_line(text, h == app.current_hunk, &app.glyphs, width));
+                let text = sanitize(fd.slice(&fd.hunks[h].header));
+                lines.push(header_line(
+                    &text,
+                    h == app.current_hunk,
+                    &app.glyphs,
+                    width,
+                ));
             }
             SideRow::Pair { left, right } => {
                 let current = left.or(right).map(|(h, _)| h) == Some(app.current_hunk);
@@ -304,11 +312,12 @@ fn fit(s: &str, width: usize) -> String {
     out
 }
 
-/// Expand tabs to the next tab stop using display width so columns line up.
+/// Expand tabs to the next tab stop using display width so columns line up,
+/// and neutralize any other control characters. Diff content is untrusted repo
+/// text; a raw `ESC`/`BEL` could be interpreted by the terminal as an escape
+/// sequence, so every control byte (other than tab, expanded here) is replaced
+/// with the single-width replacement char.
 fn expand_tabs(s: &str) -> String {
-    if !s.contains('\t') {
-        return s.to_string();
-    }
     let mut out = String::with_capacity(s.len() + 8);
     let mut col = 0;
     for ch in s.chars() {
@@ -316,6 +325,9 @@ fn expand_tabs(s: &str) -> String {
             let spaces = TAB_WIDTH - (col % TAB_WIDTH);
             out.extend(std::iter::repeat_n(' ', spaces));
             col += spaces;
+        } else if ch.is_control() {
+            out.push('\u{FFFD}');
+            col += 1;
         } else {
             out.push(ch);
             col += ch.width().unwrap_or(0);

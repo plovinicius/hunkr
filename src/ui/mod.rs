@@ -147,6 +147,43 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_path_and_content_cannot_inject_escapes() {
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        // A repo can name a file — and contain diff lines / hunk context — with
+        // raw ANSI/OSC escapes. None of it may reach the rendered buffer.
+        let evil_path = "src/\x1b]0;pwned\x07evil.rs";
+        let files = vec![ChangedFile::new(
+            PathBuf::from(evil_path),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        let raw = concat!(
+            "@@ -1,2 +1,2 @@ fn \x1b[31mctx\x1b[0m()\n",
+            " keep \x1b]0;title\x07\n",
+            "-old\x1b[1m\n",
+            "+new\x07\n",
+        );
+        app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from(evil_path)));
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            !text.contains('\x1b'),
+            "ESC leaked into the buffer:\n{text:?}"
+        );
+        assert!(
+            !text.contains('\x07'),
+            "BEL leaked into the buffer:\n{text:?}"
+        );
+        // The inert replacement char is rendered in its place.
+        assert!(text.contains('\u{FFFD}'), "expected sanitized placeholder");
+    }
+
+    #[test]
     fn current_hunk_header_is_marked() {
         use crate::git::diff::parse_unified;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

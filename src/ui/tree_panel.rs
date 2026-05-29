@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::{App, Focus};
 use crate::model::file::ChangeKind;
 use crate::model::review::ReviewStatus;
+use crate::render::sanitize;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Tree;
@@ -57,7 +58,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 node.name.clone()
             };
-            spans.push(Span::raw(name));
+            // Untrusted: paths/components can carry escape sequences.
+            spans.push(Span::raw(sanitize(&name)));
             if let Some((suffix, style)) = kind_suffix(&file.kind) {
                 spans.push(Span::styled(suffix, style));
             }
@@ -80,7 +82,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 app.glyphs.folder_open
             };
             spans.push(Span::styled(
-                format!("{arrow} {}/", node.name),
+                format!("{arrow} {}/", sanitize(&node.name)),
                 Style::default().fg(Color::Blue),
             ));
         }
