@@ -12,7 +12,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 
-use crate::model::diff::{FileDiff, Chunk};
+use crate::model::diff::{Chunk, FileDiff};
 
 /// Build the AI-ready reference for chunk `chunk_index` of `fd`: a compact
 /// `path:start-end` pointer (collapsed to `path:line` when the chunk touches a

@@ -24,8 +24,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.status_msg {
         format!(" {}", sanitize(msg))
     } else {
+        // Hidden files are excluded from the review totals — if it's hidden from
+        // the review, it shouldn't weigh on the counts.
         let (mut reviewed, mut unreviewed) = (0u32, 0u32);
         for i in 0..app.files.len() {
+            if app.is_file_hidden(i) {
+                continue;
+            }
             match app.review_status(i) {
                 ReviewStatus::Reviewed => reviewed += 1,
                 ReviewStatus::Unreviewed => unreviewed += 1,
@@ -42,10 +47,23 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             String::new()
         };
+        // A hidden-files segment appears only when some are hidden; the count is
+        // the same total whichever view is active.
+        let hidden = if app.hidden_count() > 0 {
+            format!("{sep}hidden {}", app.hidden_count())
+        } else {
+            String::new()
+        };
+        // The hidden view is a distinct mode, so flag it next to the app name.
+        let label = if app.hidden_view {
+            format!("hunkr{sep}hidden view")
+        } else {
+            "hunkr".to_string()
+        };
         // Each count is its own separator-delimited segment so the groups read
         // as evenly spaced regardless of glyph width.
         format!(
-            " hunkr{sep}{} {reviewed}{sep}{} {unreviewed}{sep}{chunk}{filter}",
+            " {label}{sep}{} {reviewed}{sep}{} {unreviewed}{hidden}{sep}{chunk}{filter}",
             g.reviewed, g.unreviewed,
         )
     };
@@ -53,7 +71,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hints = if app.mode == Mode::Filter {
         format!(" Enter apply{sep}Esc cancel ")
     } else {
-        format!(" n/p chunk{sep}s split{sep}r review{sep}y copy{sep}? help{sep}q quit ")
+        format!(" n/p chunk{sep}s split{sep}r review{sep}h hide{sep}y copy{sep}? help{sep}q quit ")
     };
 
     // Background first, then the left text. The right-aligned hints are drawn

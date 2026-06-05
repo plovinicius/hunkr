@@ -186,6 +186,25 @@ to `.git/hunkr/review.json` via `persist.rs` (versioned `schema`; git dir resolv
 `rev-parse --absolute-git-dir` for worktree correctness), loaded on startup, rewritten on
 each change.
 
+## Hidden files
+
+`h` hides the file under the cursor from the review; `H` toggles a **hidden-only view** that
+inverts the sidebar to show just the hidden files so they can be restored. Hiding is
+**permanent** — the set persists to `.git/hunkr/hidden.json` via `persist.rs` (a versioned
+`HiddenStore`, the sibling of `ReviewStore`, holding repo-relative paths), loaded on startup
+and rewritten on each change. A single `App::toggle_hidden` backs the `h` key in both views:
+it flips the selected path's membership in the store, so in the normal view it hides and in
+the hidden view (where the selection is already hidden) the same action un-hides — there is
+no separate hide/unhide code path. Both views also render through one predicate
+(`keep(file) = is_hidden(file) == hidden_view`) threaded into `FileTree::recompute_visible_with`,
+which prunes hidden file leaves **and** any folder left empty once its files are gone; the
+text filter composes with the same predicate. After a hide the selection snaps to the next
+file. Hidden files are excluded from the `✓`/`●` status-bar totals — if it's hidden from the
+review, it shouldn't weigh on the counts — and from the "Changed files (N)" sidebar count.
+Because the predicate runs inside `reconcile`, hidden files stay hidden across hot-reloads.
+Default ignore-globs and making the counter/precedence configurable are deferred to the
+config system _(planned)_.
+
 ## AI reference copy
 
 `y` on a chunk builds an AI-ready prompt (file, change #, new-file line range, the exact

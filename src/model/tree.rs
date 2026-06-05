@@ -109,18 +109,52 @@ impl FileTree {
     }
 
     /// Recompute `visible` via a pre-order DFS, descending into folders only
-    /// when they are expanded.
+    /// when they are expanded. Keeps every file.
     pub fn recompute_visible(&mut self) {
-        fn dfs(nodes: &[TreeNode], idx: usize, out: &mut Vec<usize>) {
+        self.recompute_visible_with(|_| true);
+    }
+
+    /// Recompute `visible`, keeping only file leaves for which `keep(file_idx)`
+    /// is true, and folders that (transitively) contain at least one kept file.
+    /// Used to drop hidden files — and the folders that become empty once their
+    /// only files are hidden — from the sidebar.
+    pub fn recompute_visible_with<F: Fn(usize) -> bool>(&mut self, keep: F) {
+        fn subtree_keeps_any<F: Fn(usize) -> bool>(
+            nodes: &[TreeNode],
+            idx: usize,
+            keep: &F,
+        ) -> bool {
+            nodes[idx].children.iter().any(|&c| match nodes[c].file {
+                Some(fi) => keep(fi),
+                None => subtree_keeps_any(nodes, c, keep),
+            })
+        }
+        fn dfs<F: Fn(usize) -> bool>(
+            nodes: &[TreeNode],
+            idx: usize,
+            keep: &F,
+            out: &mut Vec<usize>,
+        ) {
             for &child in &nodes[idx].children {
-                out.push(child);
-                if nodes[child].file.is_none() && !nodes[child].collapsed {
-                    dfs(nodes, child, out);
+                match nodes[child].file {
+                    Some(fi) => {
+                        if keep(fi) {
+                            out.push(child);
+                        }
+                    }
+                    None => {
+                        if subtree_keeps_any(nodes, child, keep) {
+                            out.push(child);
+                            if !nodes[child].collapsed {
+                                dfs(nodes, child, keep, out);
+                            }
+                        }
+                    }
                 }
             }
         }
         let mut visible = Vec::new();
-        dfs(&self.nodes, self.root, &mut visible);
+        dfs(&self.nodes, self.root, &keep, &mut visible);
         self.visible = visible;
     }
 }
@@ -165,5 +199,36 @@ mod tests {
             .map(|&n| tree.nodes[n].name.as_str())
             .collect();
         assert_eq!(names, vec!["src"]);
+    }
+
+    #[test]
+    fn recompute_visible_with_prunes_files_and_empty_folders() {
+        // src/foo.rs, src/bar.rs, README.md. Hide both files under src/ → the
+        // src/ folder should disappear too, leaving only README.md.
+        let files = vec![file("src/foo.rs"), file("src/bar.rs"), file("README.md")];
+        let mut tree = FileTree::build(&files);
+
+        let hidden: std::collections::HashSet<usize> = [0, 1].into_iter().collect();
+        tree.recompute_visible_with(|fi| !hidden.contains(&fi));
+
+        let names: Vec<&str> = tree
+            .visible
+            .iter()
+            .map(|&n| tree.nodes[n].name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["README.md"],
+            "empty src/ folder should be pruned"
+        );
+
+        // The inverse view (only the hidden files) keeps src/ and its two files.
+        tree.recompute_visible_with(|fi| hidden.contains(&fi));
+        let names: Vec<&str> = tree
+            .visible
+            .iter()
+            .map(|&n| tree.nodes[n].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["src", "bar.rs", "foo.rs"]);
     }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::git::command;
-use crate::model::diff::{DiffLine, FileDiff, Chunk, LineKind};
+use crate::model::diff::{Chunk, DiffLine, FileDiff, LineKind};
 use crate::model::file::ChangedFile;
 
 /// The left-hand side of the diff. Normally `HEAD`; when the repo has no

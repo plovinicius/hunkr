@@ -59,6 +59,11 @@ reviewed state → AI reference copy, with file filter and help.
   `$VISUAL`/`$EDITOR` at the top-of-viewport line (`+LINE` for editors that support it),
   then restores and redraws. Input moved onto the UI thread so the editor gets the terminal
   exclusively (`open_editor` in `main.rs`).
+- ✅ **Hide files** (`h` hide / un-hide, `H` hidden-only view): permanently drops a file from
+  the review, persisted to `.git/hunkr/hidden.json` (`HiddenStore` in `src/persist.rs`).
+  Hidden files leave the sidebar and the `✓`/`●` totals; one predicate drives both views and
+  composes with the filter; survives hot-reload. Default ignore-globs + configurable counter
+  behavior are deferred to the config system (see issues #1/#2).
 
 ## Later (not MVP)
 
