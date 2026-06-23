@@ -10,6 +10,7 @@
 mod app;
 mod cache;
 mod cli;
+mod config;
 mod event;
 mod git;
 mod glyphs;
@@ -21,7 +22,8 @@ mod terminal;
 mod ui;
 mod watch;
 
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -30,6 +32,7 @@ use crossbeam_channel::unbounded;
 use ratatui::crossterm::event::{Event as CtEvent, poll, read};
 
 use crate::app::{App, EditorRequest};
+use crate::config::Config;
 use crate::event::Event;
 
 /// How long to wait for input before checking for background events. Input
@@ -47,12 +50,24 @@ fn main() -> Result<()> {
         None => std::env::current_dir()?,
     };
     let repo_root = git::repo::discover(&start)?;
-    let mut app = App::new(repo_root)?;
+
+    // Resolve the config path (CLI override → XDG/HOME default → cwd fallback),
+    // load it, and surface any warnings once the app is built.
+    let config_path = args
+        .config
+        .or_else(Config::default_path)
+        .unwrap_or_else(|| PathBuf::from(".hunkr.toml"));
+    let (config, warnings) = Config::load(&config_path);
+
+    let mut app = App::new(repo_root, config, config_path)?;
     app.glyphs = if args.ascii {
         glyphs::Glyphs::ascii()
     } else {
         glyphs::Glyphs::unicode()
     };
+    if !warnings.is_empty() {
+        app.config_error = Some(warnings.join("; "));
+    }
 
     terminal::install_panic_hook();
     let mut tui = terminal::init()?;
@@ -107,6 +122,16 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
         if let Some(req) = app.take_editor_request() {
             open_editor(tui, app, req)?;
         }
+
+        // Open the config in $EDITOR (creating a template first if needed), then
+        // hot-reload it on return.
+        if app.take_config_edit_request() {
+            open_config(tui, app)?;
+        }
+
+        // Auto-dismiss a transient toast once its lifetime elapses. The poll
+        // above bounds how often this runs, so the toast clears on its own.
+        app.expire_toast();
     }
     Ok(())
 }
@@ -123,6 +148,51 @@ fn handle_terminal_event(app: &mut App, ev: CtEvent) {
 /// Suspend the TUI, run `$EDITOR` on the requested file (at its line, for
 /// editors that support `+LINE`), then restore the TUI and force a redraw.
 fn open_editor(tui: &mut terminal::Tui, app: &mut App, req: EditorRequest) -> Result<()> {
+    let abs = app.repo_root.join(&req.path);
+    if let Err(e) = run_editor(tui, &abs, Some(req.line)) {
+        app.error = Some(e);
+    }
+    app.dirty = true;
+    Ok(())
+}
+
+/// Suspend the TUI and open the config file in `$EDITOR` (writing the commented
+/// template first if it doesn't exist yet), then hot-reload it.
+fn open_config(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
+    let path = app.config_path.clone();
+    if !path.exists()
+        && let Err(e) = write_config_template(&path)
+    {
+        app.error = Some(e);
+        app.dirty = true;
+        return Ok(());
+    }
+    if let Err(e) = run_editor(tui, &path, None) {
+        app.error = Some(e);
+        app.dirty = true;
+        return Ok(());
+    }
+    app.reload_config();
+    Ok(())
+}
+
+/// Create the config's parent directory and seed it with the commented template.
+fn write_config_template(path: &Path) -> std::result::Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, Config::default_template())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// Hand the terminal to `$EDITOR` for `abs` (optionally jumping to `line`),
+/// then take it back. Returns a human-readable message on failure.
+fn run_editor(
+    tui: &mut terminal::Tui,
+    abs: &Path,
+    line: Option<u32>,
+) -> std::result::Result<(), String> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
@@ -130,14 +200,11 @@ fn open_editor(tui: &mut terminal::Tui, app: &mut App, req: EditorRequest) -> Re
     // `$EDITOR` may carry arguments (e.g. "code -w"); split program from args.
     let mut parts = editor.split_whitespace();
     let Some(program) = parts.next() else {
-        app.error = Some("$EDITOR is empty".into());
-        app.dirty = true;
-        return Ok(());
+        return Err("$EDITOR is empty".into());
     };
     let pre_args: Vec<&str> = parts.collect();
 
-    let abs = app.repo_root.join(&req.path);
-    let supports_line = std::path::Path::new(program)
+    let supports_line = Path::new(program)
         .file_name()
         .and_then(|n| n.to_str())
         .map(|n| PLUS_LINE_EDITORS.contains(&n))
@@ -145,20 +212,31 @@ fn open_editor(tui: &mut terminal::Tui, app: &mut App, req: EditorRequest) -> Re
 
     let mut cmd = Command::new(program);
     cmd.args(&pre_args);
-    if supports_line {
-        cmd.arg(format!("+{}", req.line));
+    if let Some(line) = line
+        && supports_line
+    {
+        cmd.arg(format!("+{line}"));
     }
-    cmd.arg(&abs);
+    cmd.arg(abs);
 
-    // Hand the terminal to the editor, then take it back.
-    terminal::restore()?;
-    let status = cmd.status();
-    *tui = terminal::init()?;
-    tui.clear()?;
-    app.dirty = true;
-
+    let status = run_suspended(tui, cmd)?;
     if let Err(e) = status {
-        app.error = Some(format!("could not run editor `{program}`: {e}"));
+        return Err(format!("could not run editor `{program}`: {e}"));
     }
     Ok(())
+}
+
+/// Leave the alternate screen, run `cmd` to completion, then re-enter the TUI.
+/// Restoring the terminal can itself fail (it returns the real `Result`); the
+/// inner `io::Result` is the command's own exit status.
+fn run_suspended(
+    tui: &mut terminal::Tui,
+    mut cmd: Command,
+) -> std::result::Result<std::io::Result<ExitStatus>, String> {
+    terminal::restore().map_err(|e| format!("could not suspend terminal: {e}"))?;
+    let status = cmd.status();
+    *tui = terminal::init().map_err(|e| format!("could not restore terminal: {e}"))?;
+    tui.clear()
+        .map_err(|e| format!("could not clear terminal: {e}"))?;
+    Ok(status)
 }

@@ -4,6 +4,7 @@
 
 mod diff_panel;
 mod help;
+mod notification;
 mod statusbar;
 mod tree_panel;
 
@@ -11,6 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
 use crate::app::{App, MIN_DIFF_WIDTH, MIN_TREE_WIDTH, Mode};
+use crate::config::Action;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -46,7 +48,23 @@ pub fn render(f: &mut Frame, app: &mut App) {
     statusbar::render(f, status, app);
 
     if app.mode == Mode::Help {
-        help::render(f, area);
+        help::render(f, area, app);
+    }
+
+    // Top-right toasts, rendered last so they sit above everything and stack
+    // downward: the persistent config error (until fixed), then the transient
+    // toast (e.g. "copied for AI", which auto-dismisses).
+    let mut next_y = area.y + 1;
+    if let Some(err) = &app.config_error {
+        let edit_key = app
+            .config
+            .keys
+            .primary(Action::EditConfig)
+            .unwrap_or_else(|| "C".to_string());
+        next_y = notification::render_config_error(f, area, next_y, err, &edit_key);
+    }
+    if let Some(toast) = &app.toast {
+        notification::render_toast(f, area, next_y, &toast.text);
     }
 }
 

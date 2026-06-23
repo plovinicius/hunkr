@@ -8,13 +8,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 
 use crate::cache::DiffCache;
+use crate::config::{self, Action, Config};
 use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
@@ -43,6 +44,11 @@ pub const MIN_TREE_WIDTH: u16 = 16;
 pub const MIN_DIFF_WIDTH: u16 = 20;
 /// Columns the sidebar grows/shrinks per `>` / `<` keypress.
 const TREE_RESIZE_STEP: u16 = 2;
+
+/// How long a transient toast (e.g. "copied for AI") stays up before it
+/// auto-dismisses. Kept short — it's a flash acknowledgement, not a message to
+/// read. The run loop's 100ms input poll bounds the dismissal resolution.
+const TOAST_TTL: Duration = Duration::from_millis(900);
 
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -74,6 +80,13 @@ pub enum Mode {
 pub struct EditorRequest {
     pub path: PathBuf,
     pub line: u32,
+}
+
+/// A transient top-right toast that auto-dismisses once `expires_at` passes
+/// (see [`App::expire_toast`]). Used for quick acknowledgements like "copied".
+pub struct Toast {
+    pub text: String,
+    pub expires_at: Instant,
 }
 
 /// How the diff panel lays out a file's changes.
@@ -178,10 +191,26 @@ pub struct App {
     /// Set when the user asks to open the current file in `$EDITOR`; the run
     /// loop takes and fulfils it.
     pub pending_editor: Option<EditorRequest>,
+
+    /// The resolved configuration (defaults overlaid with the user's file).
+    pub config: Config,
+    /// Where the user config lives on disk, used by the "edit config" action.
+    pub config_path: PathBuf,
+    /// Set when the user asks to edit the config; the run loop opens it in
+    /// `$EDITOR` (creating a template first if absent) and then hot-reloads.
+    pub pending_config_edit: bool,
+    /// A *persistent* config problem (parse error, unknown action, bad regex):
+    /// hunkr keeps running on the built-in defaults and shows this until a clean
+    /// reload clears it. Unlike `status_msg`, it survives keypresses.
+    pub config_error: Option<String>,
+
+    /// A *transient* top-right toast (e.g. "copied for AI") that auto-dismisses
+    /// after [`TOAST_TTL`]; the run loop calls [`Self::expire_toast`] to clear it.
+    pub toast: Option<Toast>,
 }
 
 impl App {
-    pub fn new(repo_root: PathBuf) -> anyhow::Result<Self> {
+    pub fn new(repo_root: PathBuf, config: Config, config_path: PathBuf) -> anyhow::Result<Self> {
         let base = git::diff::detect_base(&repo_root);
         let files = git::status::changed_files(&repo_root)?;
         let git_dir = git::repo::git_dir(&repo_root)?;
@@ -200,8 +229,11 @@ impl App {
         app.review = review;
         app.hashes = hashes;
         app.hidden = hidden;
-        // Apply the persisted hidden set before picking the first file, so the
-        // selection lands on a *shown* file rather than a hidden one.
+        app.view = config.view;
+        app.config = config;
+        app.config_path = config_path;
+        // Apply the persisted hidden set + config rules before picking the first
+        // file, so the selection lands on a *shown* file rather than a hidden one.
         app.recompute_view();
         app.select_first_file();
         app.ensure_diff_loaded();
@@ -249,6 +281,11 @@ impl App {
             status_msg: None,
             error: None,
             pending_editor: None,
+            config: Config::default(),
+            config_path: Config::default_path().unwrap_or_default(),
+            pending_config_edit: false,
+            config_error: None,
+            toast: None,
         }
     }
 
@@ -303,9 +340,8 @@ impl App {
 
     /// Number of currently-changed files that are hidden.
     pub fn hidden_count(&self) -> usize {
-        self.files
-            .iter()
-            .filter(|f| self.hidden.is_hidden(&f.path))
+        (0..self.files.len())
+            .filter(|&i| self.is_file_hidden(i))
             .count()
     }
 
@@ -315,10 +351,12 @@ impl App {
         self.files.len() - self.hidden_count()
     }
 
-    /// Whether file `fi` is hidden (used by the renderer to exclude it from the
-    /// review counts).
+    /// Whether file `fi` is hidden — either interactively (the persisted
+    /// [`HiddenStore`]) or by a config auto-hide rule. Used by the renderer to
+    /// exclude it from the review counts and by the sidebar view split.
     pub fn is_file_hidden(&self, fi: usize) -> bool {
-        self.hidden.is_hidden(&self.files[fi].path)
+        let path = &self.files[fi].path;
+        self.hidden.is_hidden(path) || self.config.hide.matches(path)
     }
 
     /// Toggle the selected file's hidden state and persist. This is the single
@@ -395,10 +433,33 @@ impl App {
             }
         };
         match crate::reference::copy(&text) {
-            Ok(method) => self.status_msg = Some(format!("copied reference via {method}")),
+            Ok(method) => self.show_toast(format!("AI reference · {method}")),
             Err(e) => self.error = Some(format!("copy failed: {e}")),
         }
         self.dirty = true;
+    }
+
+    /// Flash a transient top-right toast for [`TOAST_TTL`].
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some(Toast {
+            text,
+            expires_at: Instant::now() + TOAST_TTL,
+        });
+        self.dirty = true;
+    }
+
+    /// Clear the toast once its lifetime has elapsed. Called from the run loop,
+    /// which wakes at least every input-poll interval, so the toast dismisses on
+    /// its own without any user action.
+    pub fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| Instant::now() >= t.expires_at)
+        {
+            self.toast = None;
+            self.dirty = true;
+        }
     }
 
     // ── open in editor ─────────────────────────────────────────────────────
@@ -543,10 +604,17 @@ impl App {
     /// tree collapses to a flat list of matching files (full paths shown);
     /// otherwise it's the normal hierarchical view with empty folders pruned.
     fn recompute_view(&mut self) {
+        // Borrow individual fields (not `self`) so the closure stays disjoint
+        // from the `&mut self.tree` call below. A file is "hidden" if it's in
+        // the interactive store *or* matches a config auto-hide rule.
         let hidden = &self.hidden;
+        let hide_rules = &self.config.hide;
         let files = &self.files;
         let hidden_view = self.hidden_view;
-        let keep = |fi: usize| hidden.is_hidden(&files[fi].path) == hidden_view;
+        let keep = |fi: usize| {
+            let path = &files[fi].path;
+            (hidden.is_hidden(path) || hide_rules.matches(path)) == hidden_view
+        };
 
         if self.filter.is_empty() {
             self.tree.recompute_visible_with(keep);
@@ -933,73 +1001,108 @@ impl App {
 
     fn on_key_normal(&mut self, key: KeyEvent) {
         self.status_msg = None;
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) => self.should_quit = true,
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
-            (KeyCode::Char('?'), _) => {
-                self.mode = Mode::Help;
+        // Esc clears an active filter. It isn't a rebindable action (Esc is the
+        // universal "cancel"), so it's handled ahead of the keymap lookup.
+        if key.code == KeyCode::Esc && self.is_filtering() {
+            self.filter.clear();
+            self.recompute_view();
+            self.tree_cursor = 0;
+            self.ensure_diff_loaded();
+            self.dirty = true;
+            return;
+        }
+        let chord = config::normalize(key.code, key.modifiers);
+        if let Some(action) = self.config.keys.get(chord) {
+            self.dispatch(action);
+        }
+    }
+
+    /// Perform a bound [`Action`]. Movement actions keep their focus-dependent
+    /// behavior (e.g. `ScrollDown` moves the tree cursor when the tree is
+    /// focused, and scrolls the diff otherwise).
+    fn dispatch(&mut self, action: Action) {
+        use Action::*;
+        match action {
+            ScrollDown => match self.focus {
+                Focus::Tree => self.cursor_down(),
+                Focus::Diff => self.scroll_by(1),
+            },
+            ScrollUp => match self.focus {
+                Focus::Tree => self.cursor_up(),
+                Focus::Diff => self.scroll_by(-1),
+            },
+            PageDown => self.scroll_by(self.diff_height.max(1) as isize),
+            PageUp => self.scroll_by(-(self.diff_height.max(1) as isize)),
+            NextChunk => self.next_chunk(),
+            PrevChunk => self.prev_chunk(),
+            NextFile => self.next_file(),
+            PrevFile => self.prev_file(),
+            NarrowSidebar => self.narrow_tree(),
+            WidenSidebar => self.widen_tree(),
+            ToggleView => self.toggle_view(),
+            Top => {
+                self.scroll = 0;
+                self.sync_chunk_from_scroll();
                 self.dirty = true;
             }
-            (KeyCode::Char('/'), _) => {
-                self.mode = Mode::Filter;
+            Bottom => {
+                self.scroll = self.max_scroll();
+                self.sync_chunk_from_scroll();
                 self.dirty = true;
             }
-            (KeyCode::Esc, _) if self.is_filtering() => {
-                self.filter.clear();
-                self.recompute_view();
-                self.tree_cursor = 0;
-                self.ensure_diff_loaded();
-                self.dirty = true;
-            }
-            (KeyCode::Tab, _) => {
+            SwitchFocus => {
                 self.focus = match self.focus {
                     Focus::Tree => Focus::Diff,
                     Focus::Diff => Focus::Tree,
                 };
                 self.dirty = true;
             }
-            // Shift+arrows page the diff, aliasing PageDown/PageUp. Matched
-            // ahead of the plain-arrow arms below, whose `_` modifier would
-            // otherwise swallow the Shift variant.
-            (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::PageDown, _) => {
-                self.scroll_by(self.diff_height.max(1) as isize)
-            }
-            (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::PageUp, _) => {
-                self.scroll_by(-(self.diff_height.max(1) as isize))
-            }
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => match self.focus {
-                Focus::Tree => self.cursor_down(),
-                Focus::Diff => self.scroll_by(1),
-            },
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => match self.focus {
-                Focus::Tree => self.cursor_up(),
-                Focus::Diff => self.scroll_by(-1),
-            },
-            (KeyCode::Char('n'), _) => self.next_chunk(),
-            (KeyCode::Char('p'), _) => self.prev_chunk(),
-            (KeyCode::Char('s'), _) => self.toggle_view(),
-            (KeyCode::Char('r'), _) => self.toggle_reviewed(),
-            (KeyCode::Char('h'), _) => self.toggle_hidden(),
-            (KeyCode::Char('H'), _) => self.toggle_hidden_view(),
-            (KeyCode::Char('y'), _) => self.copy_reference(),
-            (KeyCode::Char('e'), _) => self.open_in_editor(),
-            (KeyCode::Char(']'), _) => self.next_file(),
-            (KeyCode::Char('['), _) => self.prev_file(),
-            (KeyCode::Char('<'), _) => self.narrow_tree(),
-            (KeyCode::Char('>'), _) => self.widen_tree(),
-            (KeyCode::Char('g'), _) => {
-                self.scroll = 0;
-                self.sync_chunk_from_scroll();
+            Activate => self.activate(),
+            ToggleReviewed => self.toggle_reviewed(),
+            ToggleHidden => self.toggle_hidden(),
+            ToggleHiddenView => self.toggle_hidden_view(),
+            CopyReference => self.copy_reference(),
+            OpenEditor => self.open_in_editor(),
+            EditConfig => self.pending_config_edit = true,
+            StartFilter => {
+                self.mode = Mode::Filter;
                 self.dirty = true;
             }
-            (KeyCode::Char('G'), _) => {
-                self.scroll = self.max_scroll();
-                self.sync_chunk_from_scroll();
+            Help => {
+                self.mode = Mode::Help;
                 self.dirty = true;
             }
-            (KeyCode::Enter, _) => self.activate(),
-            _ => {}
+            Quit => self.should_quit = true,
         }
+    }
+
+    // ── config ───────────────────────────────────────────────────────────────
+
+    /// Take a pending "edit config" request, if any (called by the run loop,
+    /// which owns the terminal and can suspend it for `$EDITOR`).
+    pub fn take_config_edit_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_config_edit)
+    }
+
+    /// Re-read the config from disk and re-apply it live: rebuild the keymap and
+    /// hide rules, then recompute the sidebar. The current diff view is left
+    /// as-is so a reload doesn't yank the user out of their layout. A clean load
+    /// clears any prior config error; a broken one keeps the defaults in effect
+    /// and records the problem persistently (see [`Self::config_error`]).
+    pub fn reload_config(&mut self) {
+        let (config, warnings) = Config::load(&self.config_path);
+        self.config = config;
+        self.recompute_view();
+        self.snap_cursor_to_file();
+        self.ensure_diff_loaded();
+        if warnings.is_empty() {
+            self.config_error = None;
+            self.status_msg = Some("config reloaded".to_string());
+        } else {
+            self.config_error = Some(warnings.join("; "));
+            self.status_msg = None;
+        }
+        self.dirty = true;
     }
 }
 
@@ -1067,6 +1170,7 @@ fn build_side_rows(fd: &FileDiff) -> (Vec<SideRow>, Vec<usize>) {
 mod tests {
     use super::*;
     use crate::model::file::ChangeKind;
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn file(p: &str) -> ChangedFile {
         ChangedFile::new(PathBuf::from(p), ChangeKind::Modified)
@@ -1233,6 +1337,122 @@ mod tests {
             "hidden file must not reappear after toggling its folder"
         );
         assert!(visible_paths(&a).contains(&PathBuf::from("src/b.rs")));
+    }
+
+    #[test]
+    fn rebound_key_dispatches_through_the_keymap() {
+        // End-to-end check of the keymap dispatch: a user rebind routes the new
+        // chord to the action and frees the old default.
+        let dir = std::env::temp_dir().join(format!("hunkr-app-rebind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "[keys]\ntoggle_view = \"v\"\nquit = \"x\"\n").unwrap();
+        let (config, warns) = Config::load(&cfg_path);
+        assert!(warns.is_empty(), "unexpected warnings: {warns:?}");
+
+        let mut a = app(vec![file("a.rs")]);
+        a.config = config;
+        assert_eq!(a.view, ViewMode::Unified);
+
+        a.on_key(key('v')); // rebound toggle_view
+        assert_eq!(
+            a.view,
+            ViewMode::SideBySide,
+            "rebound key should toggle the view"
+        );
+
+        a.on_key(key('s')); // the old default is no longer bound
+        assert_eq!(
+            a.view,
+            ViewMode::SideBySide,
+            "the freed default must not still toggle"
+        );
+
+        a.on_key(key('x')); // rebound quit
+        assert!(a.should_quit, "rebound quit key should quit");
+    }
+
+    #[test]
+    fn toast_shows_then_auto_expires() {
+        let mut a = app(vec![file("a.rs")]);
+        a.show_toast("copied".into());
+        assert!(a.toast.is_some());
+
+        // Not yet expired → expire_toast leaves it in place.
+        a.expire_toast();
+        assert!(
+            a.toast.is_some(),
+            "a live toast must not be dismissed early"
+        );
+
+        // Force the deadline into the past; the next tick clears it and repaints.
+        a.dirty = false;
+        if let Some(t) = &mut a.toast {
+            t.expires_at = Instant::now() - Duration::from_millis(1);
+        }
+        a.expire_toast();
+        assert!(a.toast.is_none(), "an elapsed toast must auto-dismiss");
+        assert!(a.dirty, "dismissing a toast must request a repaint");
+    }
+
+    #[test]
+    fn config_error_persists_across_keypress_and_clears_on_clean_reload() {
+        let dir = std::env::temp_dir().join(format!("hunkr-app-cfgerr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+
+        let mut a = app(vec![file("a.rs")]);
+        a.config_path = cfg_path.clone();
+
+        // A malformed config records a persistent error and keeps the defaults.
+        std::fs::write(&cfg_path, "this is = = broken\n").unwrap();
+        a.reload_config();
+        assert!(
+            a.config_error.is_some(),
+            "malformed config should set an error"
+        );
+
+        // The error survives a keypress (unlike the transient status message).
+        a.on_key(key('j'));
+        assert!(
+            a.config_error.is_some(),
+            "config error must persist across keypresses until fixed"
+        );
+
+        // Fixing the file and reloading clears the error.
+        std::fs::write(&cfg_path, "view = \"unified\"\n").unwrap();
+        a.reload_config();
+        assert!(
+            a.config_error.is_none(),
+            "a clean reload should clear the error"
+        );
+    }
+
+    #[test]
+    fn config_hide_rule_drops_file_from_sidebar() {
+        // A config auto-hide rule combines with interactive hides: a matching
+        // file is dropped from the normal view and surfaced in the hidden view.
+        let dir = std::env::temp_dir().join(format!("hunkr-app-cfgrule-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "[hide]\npatterns = [\"\\\\.lock$\"]\n").unwrap();
+        let (config, warns) = Config::load(&cfg_path);
+        assert!(warns.is_empty(), "unexpected warnings: {warns:?}");
+
+        let mut a = app(vec![file("a.rs"), file("b.lock"), file("c.rs")]);
+        a.config = config;
+        a.recompute_view();
+
+        assert!(a.is_file_hidden(1), "b.lock should match the config rule");
+        assert!(!visible_paths(&a).contains(&PathBuf::from("b.lock")));
+        assert_eq!(a.hidden_count(), 1);
+
+        // The hidden view reveals the rule-hidden file.
+        a.on_key(key('H'));
+        assert_eq!(visible_paths(&a), vec![PathBuf::from("b.lock")]);
     }
 
     #[test]

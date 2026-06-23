@@ -37,11 +37,13 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 ## Module map (`src/`)
 
 ```
-main.rs          entry: CLI parse → repo discover → App::new → terminal guard → run loop
-cli.rs           clap args (optional repo path)
+main.rs          entry: CLI parse → repo discover → config load → App::new → terminal guard → run loop
+cli.rs           clap args (optional repo path, --ascii, --config)
+config.rs        user config (TOML): Config, Action enum, KeyMap, HideRules, chord parser
+config_template.toml  static prose for the template (the [keys] block is generated)
 event.rs         background Event enum + git-worker thread feeding the channel
 terminal.rs      raw mode + alternate screen + mouse capture + panic-hook restore
-app.rs           App state (single source of truth) + update/navigation/input
+app.rs           App state (single source of truth) + update/navigation/keymap dispatch
 git/
   command.rs     spawn `git` (capture / capture_diff / succeeds)
   repo.rs        repo discovery (rev-parse --show-toplevel)
@@ -58,6 +60,8 @@ ui/
   tree_panel.rs  left panel: changed-file tree
   diff_panel.rs  right panel: virtualized stacked diff
   statusbar.rs   bottom bar: context + key hints
+  help.rs        centered help overlay (keys read from the live keymap)
+  notification.rs top-right toasts (persistent config-error + transient "copied")
 ```
 
 ---
@@ -138,13 +142,17 @@ loop {
         Error     => flash in status bar,
     }
     if let Some(req) = app.take_editor_request() { open_editor(req); }
+    if app.take_config_edit_request() { open_config(); }
+    app.expire_toast();                     // auto-dismiss a transient toast
     if app.should_quit { break; }
 }
 ```
 
 `POLL_INTERVAL` (~100ms) only bounds how soon background refreshes are noticed; input
 latency is unaffected (poll wakes immediately on a key). Idle cost is one cheap poll per
-interval.
+interval. That same idle wake-up is what auto-dismisses a transient toast: because the loop
+turns over at least every `POLL_INTERVAL`, `expire_toast` clears an elapsed `Toast` (and
+marks the frame dirty) without any timer thread — dismissal resolution is one poll interval.
 
 ## Open in editor
 
@@ -202,15 +210,20 @@ text filter composes with the same predicate. After a hide the selection snaps t
 file. Hidden files are excluded from the `✓`/`●` status-bar totals — if it's hidden from the
 review, it shouldn't weigh on the counts — and from the "Changed files (N)" sidebar count.
 Because the predicate runs inside `reconcile`, hidden files stay hidden across hot-reloads.
-Default ignore-globs and making the counter/precedence configurable are deferred to the
-config system _(planned)_.
+The predicate also ORs in **config auto-hide rules** (`is_file_hidden = HiddenStore ∪
+config.hide.matches`), so files matched by a configured name or regex are dropped without an
+explicit `h`. A rule-hidden file appears in the `H` view but can't be un-hidden interactively
+while a rule still matches it (the rule re-applies on every recompute) — a known, documented
+limitation. See [Configuration](#configuration).
 
 ## AI reference copy
 
 `y` on a chunk builds an AI-ready prompt (file, change #, new-file line range, the exact
 raw diff snippet, and an `Issue:` slot) in `src/reference.rs` and copies it via `arboard`,
 falling back to an **OSC 52** terminal escape (with a built-in base64 encoder) so it works
-over tmux/SSH where there's no local display. The status bar reports which path was used.
+over tmux/SSH where there's no local display. A brief green **toast** (`✓ Copied`, top-right)
+confirms it and which path was used, then **auto-dismisses** (`App::show_toast` sets a
+`Toast { expires_at }`; the run loop's `App::expire_toast` clears it — see [Event loop](#event-loop)).
 The line range is derived from the chunk's actual line numbers; the snippet is sliced
 byte-for-byte from the backing diff text.
 
@@ -237,7 +250,8 @@ clobber the left-side counts on a narrow terminal.
 
 ## Diff views
 
-`s` toggles `App::view` between `Unified` (stacked) and `SideBySide` (old left / new right).
+`s` toggles `App::view` between `Unified` (stacked) and `SideBySide` (old left / new right);
+the **startup** view comes from the config `view` key (default `Unified`).
 On hydration the diff is flattened into **both** a unified row list (`diff_rows`) and a
 side-by-side row list (`side_rows`, built by `build_side_rows`, which pairs each run of
 deletions with the additions that follow it). Navigation/scroll operate on whichever list
@@ -253,15 +267,60 @@ filter, Esc clears it. `?` opens a centered help overlay (`ui/help.rs`) that any
 closes. Both are driven by `App::mode` (`Normal` / `Filter` / `Help`), which `on_key`
 dispatches on.
 
+## Configuration
+
+User config is a **TOML** file at `~/.config/hunkr/config.toml` (or
+`$XDG_CONFIG_HOME/hunkr/config.toml`; override with `--config`). It is **layered**: built-in
+defaults (`Config::default`) are overlaid by the user's file, which only needs to set the
+keys it wants to change. The file is **user-owned only** — hunkr never reads a config
+committed inside the repo under review, so the `[hide]` regex patterns are trusted input
+(no untrusted-ReDoS surface). `Config::load` is **fault-tolerant**: a missing file is normal
+(defaults apply), and a malformed file falls back to defaults while returning warnings. It
+never aborts startup. Those warnings are held in `App::config_error` and shown **persistently**
+as a floating toast pinned to the **top-right corner** (`ui/notification.rs`, titled
+`⚠ Config error`, with a `press C to edit` hint) — unlike the transient `status_msg`, it
+survives keypresses, so the app keeps running on defaults and keeps flagging the problem until
+a clean `reload_config` clears it (pressing `C`, fixing the file, saving). The toast is drawn
+last in `ui::render`, above the panels.
+
+Three things are configurable (`src/config.rs`):
+
+- **`view`** — startup diff layout (`unified` | `side-by-side`).
+- **`[keys]`** — a full key remap. Every command is an `Action` enum variant; the default
+  bindings live in `KeyMap::defaults` and the user's `[keys]` table rebinds per action
+  (listing an action *replaces* its chords; omitted actions keep their default). At runtime
+  `on_key_normal` normalizes the key event into a `Chord` and looks up the `Action` in the
+  keymap, then `App::dispatch` performs it — replacing the former hardcoded `match`. Chord
+  normalization masks to Ctrl/Alt/Shift and drops Shift for character keys (the case already
+  encodes it), so `H` matches whether or not the terminal reports the Shift bit. The help
+  overlay and status-bar hints render their keys from the live keymap, so they always reflect
+  the active bindings.
+- **`[hide]`** — auto-hide rules: exact `names` (full path or final component) and regex
+  `patterns` over the repo-relative path. These combine with the interactive hides (see
+  [Hidden files](#hidden-files)).
+
+**Edit config** (`C` by default) suspends the TUI and opens the config in `$EDITOR` (reusing
+`main.rs`'s editor-suspend path), writing the commented template on first use, then
+**hot-reloads**: `App::reload_config` rebuilds the keymap and hide rules and recomputes the
+sidebar live. The current diff view is intentionally left unchanged so a reload doesn't yank
+the user out of their layout.
+
+`Config::default_template` is the static prose in `config_template.toml` **plus a generated
+`[keys]` block** built from `KeyMap::defaults()` (via `Action::ALL` + `chord_to_string`), so
+the defaults shown in a fresh config are always the real ones — a test asserts every action's
+default line is present, so the doc can't drift from the code. Discoverability of defaults is
+thus three-way: the generated template comments, the `?` help overlay (live keymap, reflects
+rebinds), and `docs/CONFIG.md`.
+
 ---
 
 ## Crates
 
 `ratatui` (TUI; re-exports `crossterm` for the backend/events — used via
 `ratatui::crossterm` to avoid version skew), `clap` (CLI), `crossbeam-channel` (event
-bus), `anyhow`/`thiserror` (errors), `unicode-width` (column math). Planned: `notify`
-(watch), `serde`/`serde_json` (persistence), `arboard` (clipboard), `ahash`/`seahash`
-(diff hash).
+bus), `anyhow`/`thiserror` (errors), `unicode-width` (column math), `notify` (watch),
+`serde`/`serde_json` (persistence), `arboard` (clipboard), `seahash` (diff hash),
+`toml` (config parsing), `regex` (config hide patterns).
 
 ## Risks
 

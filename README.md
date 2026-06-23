@@ -70,9 +70,12 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `H`       | toggle the hidden-files view             |
 | `y`       | copy AI reference for the chunk           |
 | `e`       | open the file in `$EDITOR` at the line   |
+| `C`       | edit the config file (hot-reloads)       |
 | `/`       | filter files (`Esc` clears)              |
 | `?`       | help overlay                             |
 | `q`       | quit                                     |
+
+Every key above is rebindable — see [Configuration](#configuration).
 
 `h` hides the currently-selected file from the review — it leaves the "Changed files" list
 and stops counting toward the `✓`/`●` totals. Hiding is permanent: it persists across
@@ -82,12 +85,37 @@ flags the hidden view.
 
 Reviewed state persists in `.git/hunkr/review.json`, and the hidden set in
 `.git/hunkr/hidden.json` (both per repo/worktree, never tracked).
-Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH. `e` opens
+Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH, and a brief
+top-right `✓ Copied` toast confirms it (auto-dismissing after a moment). `e` opens
 `$VISUAL`/`$EDITOR` (falling back to `vi`), jumping to the line for editors that accept
 `+LINE` (vi/vim/nvim/nano/emacs/kak); the diff refreshes automatically when you save.
 
+## Configuration
+
+hunkr reads an optional TOML config at `~/.config/hunkr/config.toml` (or
+`$XDG_CONFIG_HOME/hunkr/config.toml`; override with `--config <PATH>`). It's layered —
+built-in defaults overlaid by your file — and fault-tolerant: a malformed config falls back
+to defaults with a status-bar warning instead of failing to start. You can set the startup
+diff layout (`view`), remap any key (`[keys]`), and auto-hide files by exact name or regex
+(`[hide]`). Press `C` to open it in your editor (a commented template is created on first
+use) and it hot-reloads when you save.
+
+```toml
+view = "side-by-side"
+
+[hide]
+names    = ["Cargo.lock"]
+patterns = ["^target/"]
+
+[keys]
+toggle_view = "v"
+```
+
+See [`docs/CONFIG.md`](docs/CONFIG.md) for the full reference.
+
 ## Docs
 
+- [`docs/CONFIG.md`](docs/CONFIG.md) — config file reference (view, keys, hide rules).
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design, data model, rendering, hot
   reload, caching.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestones and status.

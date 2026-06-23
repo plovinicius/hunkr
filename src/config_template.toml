@@ -1,0 +1,32 @@
+# hunkr configuration
+#
+# This file lives at ~/.config/hunkr/config.toml (or $XDG_CONFIG_HOME/hunkr/).
+# Every setting is optional — anything you leave out keeps hunkr's default.
+# A malformed file never stops hunkr from starting; it just falls back to the
+# defaults and shows an error toast (press the edit-config key to fix it).
+#
+# Defaults are built into hunkr, so commented lines below are reference only —
+# they show what's already in effect. Press ? in hunkr to see the live bindings.
+
+# ── Diff layout ─────────────────────────────────────────────────────────────
+# The diff view hunkr starts in. Toggle at runtime with `s` (toggle_view).
+#   "unified"      stacked diff (default)
+#   "side-by-side" old on the left, new on the right
+view = "unified"
+
+# ── Auto-hide files ─────────────────────────────────────────────────────────
+# Files hidden here are dropped from the review automatically (combined with the
+# interactive `h` hides). Press `H` to reveal the hidden list.
+# [hide]
+# names    = ["Cargo.lock", "package-lock.json"]   # exact name or repo-relative path
+# patterns = ["^dist/", "\\.min\\.(js|css)$"]       # regex over the repo-relative path
+
+# ── Keybindings ─────────────────────────────────────────────────────────────
+# Rebind any action. A value is one chord ("s") or a list (["q", "ctrl+c"]).
+# Listing an action REPLACES its default chords; actions you omit are untouched.
+#
+# Chord syntax: a single character ("j", "<", "?"), a named key
+# ("enter", "tab", "esc", "up", "down", "left", "right", "pgup", "pgdn",
+# "home", "end", "space", "backspace", "del", "ins", "f1".."f12"), optionally
+# prefixed with modifiers: "ctrl+", "shift+", "alt+" (e.g. "ctrl+c", "shift+down").
+# (The actions and their current defaults are listed below this line.)
