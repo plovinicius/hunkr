@@ -84,7 +84,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             key(Action::NextChunk),
             key(Action::PrevChunk),
             key(Action::ToggleView),
-            key(Action::ToggleReviewed),
+            key(Action::ToggleChunkReviewed),
             key(Action::ToggleHidden),
             key(Action::CopyReference),
             key(Action::Help),

@@ -14,8 +14,10 @@ It is **not** a git client: no commit, push, PR, or merge. Just review.
 1. The AI edits files.
 2. `hunkr` auto-refreshes the diff (filesystem watch + off-thread git).
 3. You review file-by-file / chunk-by-chunk.
-4. Mark files reviewed (`r`). Reviewed state is tied to the file's diff hash, so if the
-   file changes again it automatically falls back to unreviewed.
+4. Mark each chunk reviewed as you go (`r`) — it collapses out of the way and the cursor
+   jumps to the next unreviewed chunk; `R` marks the whole file. Reviewed state is tied to
+   the chunk's content hash, so if a chunk changes again it (and only it) falls back to
+   unreviewed. The sidebar shows per-file progress (`2/4`).
 5. Press `y` to copy an AI-ready reference for the current chunk and paste it back to the
    agent.
 6. Repeat — never leaving the terminal.
@@ -44,8 +46,9 @@ hunkr --ascii              # force ASCII icons ([x] [ ] v >) instead of Unicode
 
 During development you can use `cargo run -- …` in place of the installed binary.
 
-Icons are Unicode by default (`✓` reviewed, `●` unreviewed, `▸`/`▾` folders); pass
-`--ascii` for a plain-text set (`[x]`, `[ ]`, `>`/`v`) if your terminal/font mis-renders
+Icons are Unicode by default (`✓` reviewed, `◐` partly reviewed, `●` unreviewed, `▸`/`▾`
+folders); pass `--ascii` for a plain-text set (`[x]`, `[~]`, `[ ]`, `>`/`v`) if your
+terminal/font mis-renders
 them. Glyphs known to render double-width in many fonts (`↻`, `⚠`) are deliberately
 avoided so columns stay aligned.
 
@@ -65,7 +68,9 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `g` / `G` | top / bottom of diff                     |
 | `Tab`     | switch tree / diff focus                 |
 | `Enter`   | expand-collapse folder / focus diff      |
-| `r`       | toggle reviewed                          |
+| `r`       | toggle reviewed for the current chunk    |
+| `R`       | toggle reviewed for the whole file       |
+| `o`       | reveal every collapsed (reviewed) chunk  |
 | `h`       | hide / un-hide the selected file         |
 | `H`       | toggle the hidden-files view             |
 | `y`       | copy AI reference for the chunk           |

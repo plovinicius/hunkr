@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Focus, RowRef, SideRow, ViewMode};
+use crate::app::{App, Focus, ReviewedDisplay, RowRef, SideRow, ViewMode};
 use crate::glyphs::Glyphs;
 use crate::model::diff::{FileDiff, LineKind};
 use crate::render::{sanitize, viewport};
@@ -80,7 +80,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim_reviewed = app.config.reviewed_chunks == ReviewedDisplay::Dim;
     let height = inner.height as usize;
     let window = viewport::visible_range(app.scroll, height, app.diff_rows.len());
 
@@ -92,6 +92,8 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                 lines.push(header_line(
                     &text,
                     h == app.current_chunk,
+                    app.chunk_reviewed(h),
+                    collapsed_lines(app, fd, h),
                     &app.glyphs,
                     inner.width as usize,
                 ));
@@ -107,18 +109,28 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                 );
                 lines.push(body_line(
                     h == app.current_chunk,
+                    dim_reviewed && app.chunk_reviewed(h),
                     gutter,
                     content,
                     color,
                     &app.glyphs,
                     inner.width as usize,
-                    dim,
                 ));
             }
         }
     }
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `Some(n)` — with `n` the number of hidden body lines — when chunk `h` is
+/// collapsed; `None` when it's expanded.
+fn collapsed_lines(app: &App, fd: &FileDiff, h: usize) -> Option<usize> {
+    if app.chunk_collapsed.get(h).copied().unwrap_or(false) {
+        Some(fd.chunks[h].lines.len())
+    } else {
+        None
+    }
 }
 
 fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
@@ -135,6 +147,7 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     let height = inner.height as usize;
     let window = viewport::visible_range(app.scroll, height, app.side_rows.len());
     let divider = Style::default().fg(Color::DarkGray);
+    let dim_reviewed = app.config.reviewed_chunks == ReviewedDisplay::Dim;
 
     let mut lines = Vec::with_capacity(window.len());
     for &row in &app.side_rows[window] {
@@ -144,15 +157,19 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                 lines.push(header_line(
                     &text,
                     h == app.current_chunk,
+                    app.chunk_reviewed(h),
+                    collapsed_lines(app, fd, h),
                     &app.glyphs,
                     width,
                 ));
             }
             SideRow::Pair { left, right } => {
-                let current = left.or(right).map(|(h, _)| h) == Some(app.current_chunk);
+                let chunk = left.or(right).map(|(h, _)| h);
+                let current = chunk == Some(app.current_chunk);
+                let dimmed = dim_reviewed && chunk.is_some_and(|h| app.chunk_reviewed(h));
                 let lead = if current { app.glyphs.chunk_bar } else { ' ' };
-                let (lc, ls) = side_cell(fd, left, left_w, Side::Old);
-                let (rc, rs) = side_cell(fd, right, right_w, Side::New);
+                let (lc, ls) = side_cell(fd, left, left_w, Side::Old, dimmed);
+                let (rc, rs) = side_cell(fd, right, right_w, Side::New, dimmed);
                 if current {
                     let bg = CURRENT_CHUNK_BODY_BG;
                     lines.push(Line::from(vec![
@@ -192,6 +209,7 @@ fn side_cell(
     cell: Option<(usize, usize)>,
     width: usize,
     side: Side,
+    dimmed: bool,
 ) -> (String, Style) {
     let Some((h, l)) = cell else {
         return (" ".repeat(width), Style::default());
@@ -219,6 +237,7 @@ fn side_cell(
     };
     let content = expand_tabs(fd.slice(&dl.text));
     let text = fit(&format!("{:>4} {marker} {content}", fmt_no(no)), width);
+    let color = if dimmed { Color::DarkGray } else { color };
     (text, Style::default().fg(color))
 }
 
@@ -227,13 +246,35 @@ fn side_cell(
 /// obvious which change is selected; others keep a blank lead column so the
 /// header text doesn't shift as you navigate. The line is padded/truncated to
 /// `width` so the highlight fills the row.
-fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<'a> {
+fn header_line<'a>(
+    text: &str,
+    current: bool,
+    reviewed: bool,
+    hidden: Option<usize>,
+    g: &Glyphs,
+    width: usize,
+) -> Line<'a> {
     let lead = if current { g.chunk_bar } else { ' ' };
-    let body = fit(&format!("{lead} {text}"), width);
+    // A ✓ prefix marks a reviewed chunk; a collapsed one also shows how many
+    // body lines are folded away.
+    let mark = if reviewed {
+        format!("{} ", g.reviewed)
+    } else {
+        String::new()
+    };
+    let suffix = match hidden {
+        Some(n) if n > 0 => format!("   {n} {}", if n == 1 { "line" } else { "lines" }),
+        _ => String::new(),
+    };
+    let body = fit(&format!("{lead} {mark}{text}{suffix}"), width);
     let style = if current {
         Style::default()
             .fg(Color::Yellow)
             .bg(CURRENT_CHUNK_HEADER_BG)
+            .add_modifier(Modifier::BOLD)
+    } else if reviewed {
+        Style::default()
+            .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -249,14 +290,17 @@ fn header_line<'a>(text: &str, current: bool, g: &Glyphs, width: usize) -> Line<
 /// row so content stays vertically aligned as the cursor moves between chunks.
 fn body_line<'a>(
     current: bool,
+    dimmed: bool,
     gutter: String,
     content: String,
     color: Color,
     g: &Glyphs,
     width: usize,
-    dim: Style,
 ) -> Line<'a> {
+    let dim = Style::default().fg(Color::DarkGray);
     let lead = if current { g.chunk_bar } else { ' ' };
+    // In "dim" mode a reviewed chunk's lines are greyed out rather than folded.
+    let color = if dimmed { Color::DarkGray } else { color };
     if current {
         let bg = CURRENT_CHUNK_BODY_BG;
         // Pad the content so the wash fills the row out to the right edge.

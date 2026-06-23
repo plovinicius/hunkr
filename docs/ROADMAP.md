@@ -63,6 +63,13 @@ reviewed state → AI reference copy, with file filter and help.
   the review, persisted to `.git/hunkr/hidden.json` (`HiddenStore` in `src/persist.rs`).
   Hidden files leave the sidebar and the `✓`/`●` totals; one predicate drives both views and
   composes with the filter; survives hot-reload.
+- ✅ **Per-chunk reviewed state** (`r` marks the current chunk, `R` the whole file, `o`
+  reveals collapsed chunks): review tracked per chunk keyed by a seahash of the chunk's
+  content; a file completes when all its chunks are reviewed, and the sidebar shows `n/m`
+  progress with a `◐` partial marker. Marking a chunk auto-collapses it (configurable
+  `reviewed_chunks = "collapse" | "dim"`) and advances to the next unreviewed chunk. The git
+  worker returns per-file `FileHashes { whole, chunks }` so an edited chunk falls back to
+  unreviewed in isolation. `model/review.rs`, `persist.rs` (schema 2), `src/ui/diff_panel.rs`.
 - ✅ **Configuration** (TOML at `~/.config/hunkr/config.toml`, `--config` to override):
   layered defaults + user overrides, fault-tolerant load (malformed → defaults + status-bar
   warning). Configurable `view` (startup layout), full `[keys]` remap (an `Action` enum +

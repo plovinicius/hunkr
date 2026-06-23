@@ -5,8 +5,9 @@
 //! forward compatibility. The files are tiny, so we just rewrite them on each
 //! change.
 //!
-//! Two stores live here: [`ReviewStore`] (reviewed-state, keyed by diff hash)
-//! and [`HiddenStore`] (the set of files the user has hidden from the review).
+//! Two stores live here: [`ReviewStore`] (reviewed-state, keyed by per-chunk
+//! content hashes) and [`HiddenStore`] (the set of files the user has hidden
+//! from the review).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::review::ReviewRecord;
 
-const SCHEMA: u32 = 1;
+const SCHEMA: u32 = 2;
 
 /// On-disk shape. Keys are repo-relative path strings (JSON object keys must be
 /// strings); the in-memory store uses `PathBuf`.
@@ -73,13 +74,15 @@ impl ReviewStore {
         self.records.keys().cloned().collect()
     }
 
-    /// Mark `path` reviewed at diff hash `hash`, and persist.
-    pub fn mark(&mut self, path: PathBuf, hash: u64, now: i64) -> Result<()> {
+    /// Mark `path` fully reviewed: record the whole-diff hash plus the content
+    /// hashes of every chunk (empty for binary/no-chunk files), and persist.
+    pub fn mark(&mut self, path: PathBuf, whole: u64, chunks: Vec<u64>, now: i64) -> Result<()> {
         self.records.insert(
             path,
             ReviewRecord {
-                reviewed_hash: hash,
+                reviewed_hash: whole,
                 reviewed_at: now,
+                reviewed_chunks: chunks,
             },
         );
         self.save()
@@ -88,6 +91,40 @@ impl ReviewStore {
     /// Remove any review record for `path`, and persist.
     pub fn unmark(&mut self, path: &Path) -> Result<()> {
         self.records.remove(path);
+        self.save()
+    }
+
+    /// Mark a single chunk (by content hash) reviewed within `path`, creating the
+    /// record if needed and refreshing the whole-diff hash, then persist.
+    pub fn mark_chunk(
+        &mut self,
+        path: PathBuf,
+        whole: u64,
+        chunk_hash: u64,
+        now: i64,
+    ) -> Result<()> {
+        let rec = self.records.entry(path).or_insert_with(|| ReviewRecord {
+            reviewed_hash: whole,
+            reviewed_at: now,
+            reviewed_chunks: Vec::new(),
+        });
+        rec.reviewed_hash = whole;
+        rec.reviewed_at = now;
+        if !rec.reviewed_chunks.contains(&chunk_hash) {
+            rec.reviewed_chunks.push(chunk_hash);
+        }
+        self.save()
+    }
+
+    /// Un-mark a single chunk within `path`. When that leaves no reviewed chunks,
+    /// the whole record is dropped. Persists either way.
+    pub fn unmark_chunk(&mut self, path: &Path, chunk_hash: u64) -> Result<()> {
+        if let Some(rec) = self.records.get_mut(path) {
+            rec.reviewed_chunks.retain(|c| *c != chunk_hash);
+            if rec.reviewed_chunks.is_empty() {
+                self.records.remove(path);
+            }
+        }
         self.save()
     }
 
@@ -203,13 +240,16 @@ mod tests {
 
         let mut store = ReviewStore::load(&dir);
         assert!(store.reviewed_paths().is_empty());
-        store.mark(PathBuf::from("src/foo.rs"), 42, 1000).unwrap();
+        store
+            .mark(PathBuf::from("src/foo.rs"), 42, vec![7, 8], 1000)
+            .unwrap();
 
         // Reloading from the same git dir sees the persisted record.
         let reloaded = ReviewStore::load(&dir);
         let rec = reloaded.get(Path::new("src/foo.rs")).unwrap();
         assert_eq!(rec.reviewed_hash, 42);
         assert_eq!(rec.reviewed_at, 1000);
+        assert_eq!(rec.reviewed_chunks, vec![7, 8]);
 
         // Unmark clears it on disk too.
         let mut store = reloaded;
@@ -219,6 +259,53 @@ mod tests {
                 .get(Path::new("src/foo.rs"))
                 .is_none()
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chunk_marks_round_trip_and_prune() {
+        let dir = std::env::temp_dir().join(format!("hunkr-chunk-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut store = ReviewStore::load(&dir);
+        store.mark_chunk(PathBuf::from("a.rs"), 100, 11, 1).unwrap();
+        store.mark_chunk(PathBuf::from("a.rs"), 100, 22, 2).unwrap();
+        // Duplicate mark is a no-op on the set.
+        store.mark_chunk(PathBuf::from("a.rs"), 100, 22, 3).unwrap();
+
+        let reloaded = ReviewStore::load(&dir);
+        assert_eq!(
+            reloaded.get(Path::new("a.rs")).unwrap().reviewed_chunks,
+            vec![11, 22]
+        );
+
+        // Removing the last chunk prunes the whole record.
+        let mut store = reloaded;
+        store.unmark_chunk(Path::new("a.rs"), 11).unwrap();
+        store.unmark_chunk(Path::new("a.rs"), 22).unwrap();
+        assert!(ReviewStore::load(&dir).get(Path::new("a.rs")).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loads_schema_1_record_without_chunks_field() {
+        let dir = std::env::temp_dir().join(format!("hunkr-compat-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let file = ReviewStore::file_for(&dir);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // A schema-1 file has no `reviewed_chunks` key on its records.
+        fs::write(
+            &file,
+            r#"{"schema":1,"files":{"src/old.rs":{"reviewed_hash":99,"reviewed_at":5}}}"#,
+        )
+        .unwrap();
+
+        let store = ReviewStore::load(&dir);
+        let rec = store.get(Path::new("src/old.rs")).unwrap();
+        assert_eq!(rec.reviewed_hash, 99);
+        assert!(rec.reviewed_chunks.is_empty());
 
         let _ = fs::remove_dir_all(&dir);
     }

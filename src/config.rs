@@ -24,7 +24,7 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::app::ViewMode;
+use crate::app::{ReviewedDisplay, ViewMode};
 
 /// A normalized key combination: a key plus its (masked) modifiers. See
 /// [`normalize`] for what "normalized" means.
@@ -50,6 +50,8 @@ pub enum Action {
     SwitchFocus,
     Activate,
     ToggleReviewed,
+    ToggleChunkReviewed,
+    ExpandAllChunks,
     ToggleHidden,
     ToggleHiddenView,
     CopyReference,
@@ -63,7 +65,7 @@ pub enum Action {
 impl Action {
     /// Every action, in display order — drives the generated config template
     /// and the help overlay row order.
-    pub const ALL: [Action; 24] = {
+    pub const ALL: [Action; 26] = {
         use Action::*;
         [
             ScrollDown,
@@ -82,6 +84,8 @@ impl Action {
             SwitchFocus,
             Activate,
             ToggleReviewed,
+            ToggleChunkReviewed,
+            ExpandAllChunks,
             ToggleHidden,
             ToggleHiddenView,
             CopyReference,
@@ -114,6 +118,8 @@ impl Action {
             SwitchFocus => "switch_focus",
             Activate => "activate",
             ToggleReviewed => "toggle_reviewed",
+            ToggleChunkReviewed => "toggle_chunk_reviewed",
+            ExpandAllChunks => "expand_all_chunks",
             ToggleHidden => "toggle_hidden",
             ToggleHiddenView => "toggle_hidden_view",
             CopyReference => "copy_reference",
@@ -144,6 +150,8 @@ impl Action {
             "switch_focus" => SwitchFocus,
             "activate" => Activate,
             "toggle_reviewed" => ToggleReviewed,
+            "toggle_chunk_reviewed" => ToggleChunkReviewed,
+            "expand_all_chunks" => ExpandAllChunks,
             "toggle_hidden" => ToggleHidden,
             "toggle_hidden_view" => ToggleHiddenView,
             "copy_reference" => CopyReference,
@@ -191,7 +199,9 @@ impl KeyMap {
             ((Char('G'), n), A::Bottom),
             ((Tab, n), A::SwitchFocus),
             ((Enter, n), A::Activate),
-            ((Char('r'), n), A::ToggleReviewed),
+            ((Char('r'), n), A::ToggleChunkReviewed),
+            ((Char('R'), n), A::ToggleReviewed),
+            ((Char('o'), n), A::ExpandAllChunks),
             ((Char('h'), n), A::ToggleHidden),
             ((Char('H'), n), A::ToggleHiddenView),
             ((Char('y'), n), A::CopyReference),
@@ -275,6 +285,7 @@ impl HideRules {
 /// The fully-resolved configuration the app runs against.
 pub struct Config {
     pub view: ViewMode,
+    pub reviewed_chunks: ReviewedDisplay,
     pub keys: KeyMap,
     pub hide: HideRules,
 }
@@ -283,6 +294,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             view: ViewMode::Unified,
+            reviewed_chunks: ReviewedDisplay::Collapse,
             keys: KeyMap::default(),
             hide: HideRules::default(),
         }
@@ -322,6 +334,15 @@ impl Config {
                 return (cfg, warnings);
             }
         };
+
+        if let Some(v) = raw.reviewed_chunks.as_deref() {
+            match parse_reviewed_display(v) {
+                Some(rd) => cfg.reviewed_chunks = rd,
+                None => warnings.push(format!(
+                    "unknown reviewed_chunks `{v}` (use \"collapse\" or \"dim\")"
+                )),
+            }
+        }
 
         if let Some(v) = raw.view.as_deref() {
             match parse_view(v) {
@@ -406,6 +427,7 @@ fn default_keys_doc() -> String {
 #[derive(Deserialize, Default)]
 struct RawConfig {
     view: Option<String>,
+    reviewed_chunks: Option<String>,
     #[serde(default)]
     hide: RawHide,
     #[serde(default)]
@@ -443,6 +465,14 @@ fn parse_view(s: &str) -> Option<ViewMode> {
     match s.trim().to_ascii_lowercase().as_str() {
         "unified" | "default" | "stacked" => Some(ViewMode::Unified),
         "side-by-side" | "side_by_side" | "sidebyside" | "split" => Some(ViewMode::SideBySide),
+        _ => None,
+    }
+}
+
+fn parse_reviewed_display(s: &str) -> Option<ReviewedDisplay> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "collapse" | "fold" | "hide" => Some(ReviewedDisplay::Collapse),
+        "dim" | "dimmed" | "keep" => Some(ReviewedDisplay::Dim),
         _ => None,
     }
 }

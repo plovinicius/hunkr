@@ -14,6 +14,7 @@ use anyhow::Result;
 use crate::git::command;
 use crate::model::diff::{Chunk, DiffLine, FileDiff, LineKind};
 use crate::model::file::ChangedFile;
+use crate::model::review::FileHashes;
 
 /// The left-hand side of the diff. Normally `HEAD`; when the repo has no
 /// commits yet we diff against git's well-known empty-tree object so that
@@ -93,18 +94,42 @@ pub fn hash_text(text: &str) -> u64 {
     seahash::hash(text.as_bytes())
 }
 
+/// Stable, deterministic content hash of a single chunk: its `@@` header plus
+/// every line. Used to key per-chunk reviewed state, so an unchanged chunk stays
+/// reviewed across refreshes and only an edited chunk reverts. seahash with fixed
+/// seeds (like [`hash_text`]) so the value persists across sessions.
+pub fn hash_chunk(fd: &FileDiff, chunk: &Chunk) -> u64 {
+    use std::hash::Hasher;
+    let mut h = seahash::SeaHasher::new();
+    h.write(fd.slice(&chunk.header).as_bytes());
+    for line in &chunk.lines {
+        h.write(b"\n");
+        h.write(fd.slice(&line.text).as_bytes());
+    }
+    h.finish()
+}
+
+/// The whole-diff hash plus a content hash per chunk for an already-parsed diff.
+pub fn file_hashes(fd: &FileDiff) -> FileHashes {
+    FileHashes {
+        whole: hash_text(&fd.text),
+        chunks: fd.chunks.iter().map(|c| hash_chunk(fd, c)).collect(),
+    }
+}
+
 /// Compute current diff hashes for the given files. Used off the UI thread to
-/// detect when a previously-reviewed file has changed. Files whose diff can't
-/// be fetched are omitted.
+/// detect when a previously-reviewed file (or one of its chunks) has changed.
+/// Files whose diff can't be fetched are omitted.
 pub fn diff_hashes_for<'a>(
     repo_root: &Path,
     base: DiffBase,
     files: impl IntoIterator<Item = &'a ChangedFile>,
-) -> HashMap<PathBuf, u64> {
+) -> HashMap<PathBuf, FileHashes> {
     let mut map = HashMap::new();
     for f in files {
         if let Ok(text) = fetch_diff_text(repo_root, base, f) {
-            map.insert(f.path.clone(), hash_text(&text));
+            let fd = parse_unified(Arc::from(text), f.path.clone());
+            map.insert(f.path.clone(), file_hashes(&fd));
         }
     }
     map
@@ -280,5 +305,34 @@ mod tests {
         let d = parse(raw);
         assert_eq!(d.chunks.len(), 2);
         assert_eq!(d.chunks[1].lines[0].old_no, Some(10));
+    }
+
+    #[test]
+    fn chunk_hash_is_stable_and_content_sensitive() {
+        let d = parse("@@ -1,1 +1,1 @@\n-a\n+b\n@@ -10,1 +10,1 @@\n-c\n+d\n");
+        // Re-parsing identical text yields identical per-chunk hashes.
+        let d2 = parse("@@ -1,1 +1,1 @@\n-a\n+b\n@@ -10,1 +10,1 @@\n-c\n+d\n");
+        assert_eq!(hash_chunk(&d, &d.chunks[0]), hash_chunk(&d2, &d2.chunks[0]));
+        // Distinct chunks hash differently.
+        assert_ne!(hash_chunk(&d, &d.chunks[0]), hash_chunk(&d, &d.chunks[1]));
+        // Editing a chunk's content changes only that chunk's hash.
+        let edited = parse("@@ -1,1 +1,1 @@\n-a\n+B\n@@ -10,1 +10,1 @@\n-c\n+d\n");
+        assert_ne!(
+            hash_chunk(&d, &d.chunks[0]),
+            hash_chunk(&edited, &edited.chunks[0])
+        );
+        assert_eq!(
+            hash_chunk(&d, &d.chunks[1]),
+            hash_chunk(&edited, &edited.chunks[1])
+        );
+    }
+
+    #[test]
+    fn file_hashes_cover_whole_and_each_chunk() {
+        let d = parse("@@ -1,1 +1,1 @@\n-a\n+b\n@@ -10,1 +10,1 @@\n-c\n+d\n");
+        let fh = file_hashes(&d);
+        assert_eq!(fh.whole, hash_text(&d.text));
+        assert_eq!(fh.chunks.len(), 2);
+        assert_eq!(fh.chunks[0], hash_chunk(&d, &d.chunks[0]));
     }
 }

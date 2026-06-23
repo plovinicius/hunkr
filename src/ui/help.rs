@@ -30,7 +30,12 @@ const ROWS: &[(Action, &str)] = &[
     (Action::NarrowSidebar, "narrow sidebar (drag divider too)"),
     (Action::WidenSidebar, "widen sidebar"),
     (Action::ToggleView, "toggle unified / side-by-side"),
-    (Action::ToggleReviewed, "toggle reviewed"),
+    (
+        Action::ToggleChunkReviewed,
+        "toggle reviewed (current chunk)",
+    ),
+    (Action::ToggleReviewed, "toggle reviewed (whole file)"),
+    (Action::ExpandAllChunks, "reveal all collapsed chunks"),
     (Action::ToggleHidden, "hide / un-hide the selected file"),
     (Action::ToggleHiddenView, "toggle the hidden-files view"),
     (Action::CopyReference, "copy AI reference for the chunk"),
@@ -106,5 +111,22 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
         y: area.y + area.height.saturating_sub(h) / 2,
         width: w,
         height: h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_lists_every_action() {
+        // Guards against the overlay drifting out of sync when a new `Action` is
+        // added — every action must have a help row.
+        for action in Action::ALL {
+            assert!(
+                ROWS.iter().any(|(a, _)| *a == action),
+                "action {action:?} is missing from the help overlay"
+            );
+        }
     }
 }
