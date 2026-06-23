@@ -66,13 +66,22 @@ Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 | `Tab`     | switch tree / diff focus                 |
 | `Enter`   | expand-collapse folder / focus diff      |
 | `r`       | toggle reviewed                          |
+| `h`       | hide / un-hide the selected file         |
+| `H`       | toggle the hidden-files view             |
 | `y`       | copy AI reference for the chunk           |
 | `e`       | open the file in `$EDITOR` at the line   |
 | `/`       | filter files (`Esc` clears)              |
 | `?`       | help overlay                             |
 | `q`       | quit                                     |
 
-Reviewed state persists in `.git/hunkr/review.json` (per repo/worktree, never tracked).
+`h` hides the currently-selected file from the review — it leaves the "Changed files" list
+and stops counting toward the `✓`/`●` totals. Hiding is permanent: it persists across
+sessions until you un-hide. Press `H` to flip the sidebar to a hidden-only view (titled
+"Hidden files") where the same `h` un-hides; the status bar reports the hidden count and
+flags the hidden view.
+
+Reviewed state persists in `.git/hunkr/review.json`, and the hidden set in
+`.git/hunkr/hidden.json` (both per repo/worktree, never tracked).
 Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH. `e` opens
 `$VISUAL`/`$EDITOR` (falling back to `vi`), jumping to the line for editors that accept
 `+LINE` (vi/vim/nvim/nano/emacs/kak); the diff refreshes automatically when you save.

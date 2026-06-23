@@ -256,6 +256,71 @@ mod tests {
     }
 
     #[test]
+    fn hiding_a_file_drops_it_from_the_sidebar_and_counts() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let files = vec![
+            ChangedFile::new(PathBuf::from("keep.rs"), ChangeKind::Modified),
+            ChangedFile::new(PathBuf::from("noise.lock"), ChangeKind::Modified),
+        ];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        // Anchor the hidden store at a writable temp dir so the hide persists.
+        let dir = std::env::temp_dir().join(format!("hunkr-ui-hide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.hidden = crate::persist::HiddenStore::empty(&dir);
+
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let hide = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        let toggle_view = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE);
+
+        // Move to noise.lock (sorts after keep.rs) and hide it.
+        app.on_key(down);
+        app.on_key(hide);
+        // The synthetic /repo path can't satisfy `git diff`; clear that
+        // unrelated error so the status bar shows its normal counts segment.
+        app.error = None;
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            text.contains("Changed files (1)"),
+            "shown count should drop to 1:\n{text}"
+        );
+        assert!(text.contains("keep.rs"), "kept file should remain:\n{text}");
+        assert!(
+            !text.contains("noise.lock"),
+            "hidden file must be gone from the sidebar:\n{text}"
+        );
+        // The hidden file is excluded from the review totals, and a hidden
+        // segment reports the count.
+        assert!(
+            text.contains("● 1"),
+            "review count should exclude the hidden file:\n{text}"
+        );
+        assert!(text.contains("hidden 1"), "hidden count missing:\n{text}");
+
+        // Toggling the hidden view surfaces only the hidden file.
+        app.on_key(toggle_view);
+        app.error = None;
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("Hidden files (1)"),
+            "hidden-view title missing:\n{text}"
+        );
+        assert!(
+            text.contains("noise.lock"),
+            "hidden view should show the hidden file:\n{text}"
+        );
+        assert!(
+            !text.contains("keep.rs"),
+            "hidden view should not show shown files:\n{text}"
+        );
+    }
+
+    #[test]
     fn help_overlay_lists_keybindings() {
         let files = vec![ChangedFile::new(
             PathBuf::from("a.rs"),

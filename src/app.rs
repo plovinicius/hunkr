@@ -19,12 +19,12 @@ use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
 use crate::model::review::{self, ReviewStatus};
 use crate::model::{
-    diff::{FileDiff, Chunk, LineKind},
+    diff::{Chunk, FileDiff, LineKind},
     file::{ChangeKind, ChangedFile},
     snapshot::GitSnapshot,
     tree::FileTree,
 };
-use crate::persist::ReviewStore;
+use crate::persist::{HiddenStore, ReviewStore};
 use crate::render::viewport;
 
 /// Max parsed diffs kept hydrated in the LRU cache.
@@ -139,6 +139,13 @@ pub struct App {
     /// review"). Maintained on mark and on each refresh.
     pub hashes: HashMap<PathBuf, u64>,
 
+    /// Persisted set of files hidden from the review. Hidden files are dropped
+    /// from the sidebar and excluded from the review counts.
+    pub hidden: HiddenStore,
+    /// When true, the sidebar inverts to show *only* hidden files (so they can
+    /// be un-hidden); otherwise hidden files are dropped from the normal list.
+    pub hidden_view: bool,
+
     pub focus: Focus,
     pub mode: Mode,
     pub view: ViewMode,
@@ -187,9 +194,15 @@ impl App {
             files.iter().filter(|f| review.get(&f.path).is_some()),
         );
 
+        let hidden = HiddenStore::load(&git_dir);
+
         let mut app = Self::with_files(repo_root, base, files);
         app.review = review;
         app.hashes = hashes;
+        app.hidden = hidden;
+        // Apply the persisted hidden set before picking the first file, so the
+        // selection lands on a *shown* file rather than a hidden one.
+        app.recompute_view();
         app.select_first_file();
         app.ensure_diff_loaded();
         Ok(app)
@@ -201,6 +214,7 @@ impl App {
     pub(crate) fn with_files(repo_root: PathBuf, base: DiffBase, files: Vec<ChangedFile>) -> Self {
         let tree = FileTree::build(&files);
         let review = ReviewStore::empty(&repo_root.join(".git"));
+        let hidden = HiddenStore::empty(&repo_root.join(".git"));
         App {
             repo_root,
             base,
@@ -218,6 +232,8 @@ impl App {
             current_chunk: 0,
             review,
             hashes: HashMap::new(),
+            hidden,
+            hidden_view: false,
             focus: Focus::Tree,
             mode: Mode::Normal,
             view: ViewMode::Unified,
@@ -281,6 +297,86 @@ impl App {
             self.error = Some(format!("could not save review state: {e}"));
         }
         self.dirty = true;
+    }
+
+    // ── hidden state ─────────────────────────────────────────────────────────
+
+    /// Number of currently-changed files that are hidden.
+    pub fn hidden_count(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|f| self.hidden.is_hidden(&f.path))
+            .count()
+    }
+
+    /// Number of currently-changed files that are *not* hidden (the normal
+    /// "Changed files" total).
+    pub fn shown_count(&self) -> usize {
+        self.files.len() - self.hidden_count()
+    }
+
+    /// Whether file `fi` is hidden (used by the renderer to exclude it from the
+    /// review counts).
+    pub fn is_file_hidden(&self, fi: usize) -> bool {
+        self.hidden.is_hidden(&self.files[fi].path)
+    }
+
+    /// Toggle the selected file's hidden state and persist. This is the single
+    /// `h` action: in the normal view it hides the file; in the hidden view the
+    /// selected file is already hidden, so the same toggle un-hides it. Either
+    /// way the file leaves the current list, so the selection snaps to the next
+    /// file.
+    fn toggle_hidden(&mut self) {
+        let Some(fi) = self.current_file_index() else {
+            return;
+        };
+        let path = self.files[fi].path.clone();
+        let result = if self.hidden.is_hidden(&path) {
+            self.hidden.unhide(&path)
+        } else {
+            self.hidden.hide(path)
+        };
+        if let Err(e) = result {
+            self.error = Some(format!("could not save hidden state: {e}"));
+        }
+        // The file just left the current view; rebuild it and land on the next
+        // file (keeping the same row index naturally selects the follower).
+        self.recompute_view();
+        self.snap_cursor_to_file();
+        self.ensure_diff_loaded();
+        self.dirty = true;
+    }
+
+    /// Toggle between the normal sidebar and the hidden-only view. Both render
+    /// through the same code path (see [`Self::recompute_view`]); this only
+    /// flips which set is shown and re-anchors the cursor on the first file.
+    fn toggle_hidden_view(&mut self) {
+        self.hidden_view = !self.hidden_view;
+        self.recompute_view();
+        self.tree_cursor = self.first_file_cursor().unwrap_or(0);
+        self.ensure_diff_loaded();
+        self.dirty = true;
+    }
+
+    /// Keep the cursor on a file leaf after the visible list changes: clamp into
+    /// range, then scan forward (the natural "next file") and finally backward.
+    fn snap_cursor_to_file(&mut self) {
+        if self.tree.visible.is_empty() {
+            self.tree_cursor = 0;
+            return;
+        }
+        if self.tree_cursor >= self.tree.visible.len() {
+            self.tree_cursor = self.tree.visible.len() - 1;
+        }
+        if self.current_file_index().is_some() {
+            return;
+        }
+        let is_file = |c: usize| self.tree.nodes[self.tree.visible[c]].file.is_some();
+        if let Some(i) = (self.tree_cursor..self.tree.visible.len()).find(|&c| is_file(c)) {
+            self.tree_cursor = i;
+        } else if let Some(i) = (0..self.tree_cursor).rev().find(|&c| is_file(c)) {
+            self.tree_cursor = i;
+        }
     }
 
     // ── AI reference ───────────────────────────────────────────────────────
@@ -441,12 +537,19 @@ impl App {
         !self.filter.is_empty()
     }
 
-    /// Recompute the tree's visible list. With an active filter, the tree
-    /// collapses to a flat list of files whose path matches (case-insensitive);
-    /// otherwise it's the normal hierarchical view.
+    /// Recompute the tree's visible list. One `keep` predicate gates both the
+    /// hidden/normal view split and the text filter, so there's a single source
+    /// of truth for "what's in the sidebar right now". With an active filter the
+    /// tree collapses to a flat list of matching files (full paths shown);
+    /// otherwise it's the normal hierarchical view with empty folders pruned.
     fn recompute_view(&mut self) {
+        let hidden = &self.hidden;
+        let files = &self.files;
+        let hidden_view = self.hidden_view;
+        let keep = |fi: usize| hidden.is_hidden(&files[fi].path) == hidden_view;
+
         if self.filter.is_empty() {
-            self.tree.recompute_visible();
+            self.tree.recompute_visible_with(keep);
         } else {
             let q = self.filter.to_lowercase();
             self.tree.visible = self
@@ -456,11 +559,7 @@ impl App {
                 .enumerate()
                 .filter_map(|(idx, node)| {
                     let fi = node.file?;
-                    self.files[fi]
-                        .path
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .contains(&q)
+                    (keep(fi) && files[fi].path.to_string_lossy().to_lowercase().contains(&q))
                         .then_some(idx)
                 })
                 .collect();
@@ -616,9 +715,10 @@ impl App {
         };
         if self.tree.is_dir(node) {
             self.tree.toggle(node);
-            if self.tree_cursor >= self.tree.visible.len() {
-                self.tree_cursor = self.tree.visible.len().saturating_sub(1);
-            }
+            // `toggle` rebuilds the visible list keeping every file; re-apply the
+            // hidden/filter predicate so hidden files don't reappear, and let it
+            // clamp the cursor.
+            self.recompute_view();
             self.ensure_diff_loaded();
         } else {
             self.focus = Focus::Diff;
@@ -879,6 +979,8 @@ impl App {
             (KeyCode::Char('p'), _) => self.prev_chunk(),
             (KeyCode::Char('s'), _) => self.toggle_view(),
             (KeyCode::Char('r'), _) => self.toggle_reviewed(),
+            (KeyCode::Char('h'), _) => self.toggle_hidden(),
+            (KeyCode::Char('H'), _) => self.toggle_hidden_view(),
             (KeyCode::Char('y'), _) => self.copy_reference(),
             (KeyCode::Char('e'), _) => self.open_in_editor(),
             (KeyCode::Char(']'), _) => self.next_file(),
@@ -904,7 +1006,8 @@ impl App {
 /// The first meaningful line number of a chunk: the first line carrying a
 /// new-file number, else the first old-file number, else `None`.
 fn first_line_no(chunk: &Chunk) -> Option<u32> {
-    chunk.lines
+    chunk
+        .lines
         .iter()
         .find_map(|l| l.new_no)
         .or_else(|| chunk.lines.iter().find_map(|l| l.old_no))
@@ -1032,6 +1135,128 @@ mod tests {
         assert_eq!(a.mode, Mode::Normal);
         assert!(!a.is_filtering());
         assert!(a.tree.visible.len() > 1);
+    }
+
+    /// Point the app's hidden store at a writable temp dir so `hide`/`unhide`
+    /// actually persist (the synthetic `/repo` path isn't writable). Each test
+    /// gets its own subdir to stay independent under parallel execution.
+    fn writable_hidden(a: &mut App, name: &str) {
+        let dir =
+            std::env::temp_dir().join(format!("hunkr-app-hidden-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        a.hidden = crate::persist::HiddenStore::empty(&dir);
+    }
+
+    fn visible_paths(a: &App) -> Vec<PathBuf> {
+        a.tree
+            .visible
+            .iter()
+            .filter_map(|&n| a.tree.nodes[n].file)
+            .map(|fi| a.files[fi].path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn h_hides_selected_file_and_advances_to_next() {
+        let mut a = app(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
+        writable_hidden(&mut a, "advance");
+        a.tree_cursor = a.first_file_cursor().unwrap();
+        assert_eq!(
+            a.current_file_index().map(|i| a.files[i].path.clone()),
+            Some(PathBuf::from("a.rs"))
+        );
+
+        a.on_key(key('h'));
+
+        assert_eq!(a.hidden_count(), 1);
+        assert!(a.hidden.is_hidden(Path::new("a.rs")));
+        // a.rs is gone from the sidebar; the selection advanced to the next file.
+        assert!(!visible_paths(&a).contains(&PathBuf::from("a.rs")));
+        assert_eq!(
+            a.current_file_index().map(|i| a.files[i].path.clone()),
+            Some(PathBuf::from("b.rs")),
+            "selection should move to the next file after hiding"
+        );
+    }
+
+    #[test]
+    fn capital_h_shows_hidden_view_and_h_there_unhides() {
+        let mut a = app(vec![file("a.rs"), file("b.rs")]);
+        writable_hidden(&mut a, "view");
+        a.tree_cursor = a.first_file_cursor().unwrap();
+        a.on_key(key('h')); // hide a.rs
+        assert_eq!(a.hidden_count(), 1);
+
+        a.on_key(key('H')); // enter the hidden-only view
+        assert!(a.hidden_view);
+        assert_eq!(
+            visible_paths(&a),
+            vec![PathBuf::from("a.rs")],
+            "hidden view should show only the hidden file"
+        );
+
+        // The same `h` action un-hides here (the selected file is already hidden).
+        a.tree_cursor = a.first_file_cursor().unwrap();
+        a.on_key(key('h'));
+        assert_eq!(a.hidden_count(), 0);
+        assert!(!a.hidden.is_hidden(Path::new("a.rs")));
+        assert!(
+            a.tree.visible.is_empty(),
+            "nothing left to show once the last hidden file is restored"
+        );
+    }
+
+    #[test]
+    fn hidden_files_stay_hidden_when_toggling_a_folder() {
+        // Regression: folder collapse/expand rebuilds the visible list, and must
+        // not resurrect a hidden file.
+        let mut a = app(vec![file("src/a.rs"), file("src/b.rs"), file("README.md")]);
+        writable_hidden(&mut a, "folder_toggle");
+        a.tree_cursor = a.cursor_for_path(Path::new("src/a.rs")).unwrap();
+        a.on_key(key('h')); // hide src/a.rs
+        assert!(a.hidden.is_hidden(Path::new("src/a.rs")));
+        assert!(!visible_paths(&a).contains(&PathBuf::from("src/a.rs")));
+
+        // Collapse then expand the src/ folder via Enter.
+        let src = a
+            .tree
+            .visible
+            .iter()
+            .position(|&n| a.tree.nodes[n].name == "src" && a.tree.nodes[n].file.is_none())
+            .unwrap();
+        a.tree_cursor = src;
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // collapse
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // expand
+
+        assert!(
+            !visible_paths(&a).contains(&PathBuf::from("src/a.rs")),
+            "hidden file must not reappear after toggling its folder"
+        );
+        assert!(visible_paths(&a).contains(&PathBuf::from("src/b.rs")));
+    }
+
+    #[test]
+    fn hidden_files_stay_hidden_across_a_refresh() {
+        let mut a = app(vec![file("a.rs"), file("b.rs")]);
+        writable_hidden(&mut a, "refresh");
+        a.tree_cursor = a.first_file_cursor().unwrap();
+        a.on_key(key('h')); // hide a.rs
+        assert!(a.hidden.is_hidden(Path::new("a.rs")));
+
+        // A hot-reload brings the same file list back.
+        a.reconcile(GitSnapshot {
+            files: vec![file("a.rs"), file("b.rs")],
+            hashes: HashMap::new(),
+        });
+
+        assert!(
+            a.hidden.is_hidden(Path::new("a.rs")),
+            "hide must survive a refresh"
+        );
+        assert!(
+            !visible_paths(&a).contains(&PathBuf::from("a.rs")),
+            "hidden file must stay out of the sidebar after a refresh"
+        );
     }
 
     #[test]

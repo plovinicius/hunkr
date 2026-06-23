@@ -13,7 +13,13 @@ use crate::render::sanitize;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Tree;
-    let title = format!(" Changed files ({}) ", app.files.len());
+    // The hidden view inverts the list: it shows only hidden files (so they can
+    // be un-hidden), so its title and count track the hidden set.
+    let title = if app.hidden_view {
+        format!(" Hidden files ({}) ", app.hidden_count())
+    } else {
+        format!(" Changed files ({}) ", app.shown_count())
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style(focused))
@@ -22,8 +28,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(block, area);
 
     if app.tree.visible.is_empty() {
+        let empty = if app.hidden_view {
+            "No hidden files"
+        } else {
+            "No changes"
+        };
         f.render_widget(
-            Paragraph::new("No changes").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(empty).style(Style::default().fg(Color::DarkGray)),
             inner,
         );
         return;

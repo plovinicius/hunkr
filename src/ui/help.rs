@@ -18,6 +18,8 @@ const KEYS: &[(&str, &str)] = &[
     ("Tab", "switch tree / diff focus"),
     ("Enter", "expand-collapse folder / focus diff"),
     ("r", "toggle reviewed"),
+    ("h", "hide / un-hide the selected file"),
+    ("H", "toggle the hidden-files view"),
     ("y", "copy AI reference for the chunk"),
     ("e", "open file in $EDITOR at the line"),
     ("/", "filter files (Esc to clear)"),
