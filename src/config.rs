@@ -4,7 +4,7 @@
 //! ([`Config::default`]) and the user's file *overrides* only the keys it sets.
 //! A missing file is normal (defaults apply silently); a malformed file never
 //! aborts startup — it falls back to defaults and the problems are returned as
-//! warnings for the UI to surface in the status bar.
+//! warnings for the UI to surface (a persistent top-right error toast).
 //!
 //! Three things are configurable:
 //! - `view` — the default diff layout (`unified` or `side-by-side`).

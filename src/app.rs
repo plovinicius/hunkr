@@ -1340,6 +1340,40 @@ mod tests {
     }
 
     #[test]
+    fn rebound_key_dispatches_through_the_keymap() {
+        // End-to-end check of the keymap dispatch: a user rebind routes the new
+        // chord to the action and frees the old default.
+        let dir = std::env::temp_dir().join(format!("hunkr-app-rebind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "[keys]\ntoggle_view = \"v\"\nquit = \"x\"\n").unwrap();
+        let (config, warns) = Config::load(&cfg_path);
+        assert!(warns.is_empty(), "unexpected warnings: {warns:?}");
+
+        let mut a = app(vec![file("a.rs")]);
+        a.config = config;
+        assert_eq!(a.view, ViewMode::Unified);
+
+        a.on_key(key('v')); // rebound toggle_view
+        assert_eq!(
+            a.view,
+            ViewMode::SideBySide,
+            "rebound key should toggle the view"
+        );
+
+        a.on_key(key('s')); // the old default is no longer bound
+        assert_eq!(
+            a.view,
+            ViewMode::SideBySide,
+            "the freed default must not still toggle"
+        );
+
+        a.on_key(key('x')); // rebound quit
+        assert!(a.should_quit, "rebound quit key should quit");
+    }
+
+    #[test]
     fn toast_shows_then_auto_expires() {
         let mut a = app(vec![file("a.rs")]);
         a.show_toast("copied".into());
