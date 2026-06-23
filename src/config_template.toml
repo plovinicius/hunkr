@@ -1,0 +1,55 @@
+# hunkr configuration
+#
+# This file lives at ~/.config/hunkr/config.toml (or $XDG_CONFIG_HOME/hunkr/).
+# Every setting is optional — anything you leave out keeps hunkr's default.
+# A malformed file never stops hunkr from starting; it just falls back to the
+# defaults and shows a warning in the status bar.
+
+# ── Diff layout ─────────────────────────────────────────────────────────────
+# The diff view hunkr starts in. Toggle at runtime with `s` (toggle_view).
+#   "unified"      stacked diff (default)
+#   "side-by-side" old on the left, new on the right
+view = "unified"
+
+# ── Auto-hide files ─────────────────────────────────────────────────────────
+# Files hidden here are dropped from the review automatically (combined with the
+# interactive `h` hides). Press `H` to reveal the hidden list.
+# [hide]
+# names    = ["Cargo.lock", "package-lock.json"]   # exact name or repo-relative path
+# patterns = ["^dist/", "\\.min\\.(js|css)$"]       # regex over the repo-relative path
+
+# ── Keybindings ─────────────────────────────────────────────────────────────
+# Rebind any action. A value is one chord ("s") or a list (["q", "ctrl+c"]).
+# Listing an action REPLACES its default chords; actions you omit are untouched.
+#
+# Chord syntax: a single character ("j", "<", "?"), a named key
+# ("enter", "tab", "esc", "up", "down", "left", "right", "pgup", "pgdn",
+# "home", "end", "space", "backspace", "del", "ins", "f1".."f12"), optionally
+# prefixed with modifiers: "ctrl+", "shift+", "alt+" (e.g. "ctrl+c", "shift+down").
+#
+# Available actions and their defaults:
+# [keys]
+# scroll_down        = ["j", "down"]
+# scroll_up          = ["k", "up"]
+# page_down          = ["pgdn", "shift+down"]
+# page_up            = ["pgup", "shift+up"]
+# next_chunk         = "n"
+# prev_chunk         = "p"
+# next_file          = "]"
+# prev_file          = "["
+# narrow_sidebar     = "<"
+# widen_sidebar      = ">"
+# toggle_view        = "s"
+# top                = "g"
+# bottom             = "G"
+# switch_focus       = "tab"
+# activate           = "enter"
+# toggle_reviewed    = "r"
+# toggle_hidden      = "h"
+# toggle_hidden_view = "H"
+# copy_reference     = "y"
+# open_editor        = "e"
+# edit_config        = "C"
+# start_filter       = "/"
+# help               = "?"
+# quit               = ["q", "ctrl+c"]

@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
+use crate::config::Action;
 use crate::model::review::ReviewStatus;
 use crate::render::sanitize;
 
@@ -71,7 +72,24 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let hints = if app.mode == Mode::Filter {
         format!(" Enter apply{sep}Esc cancel ")
     } else {
-        format!(" n/p chunk{sep}s split{sep}r review{sep}h hide{sep}y copy{sep}? help{sep}q quit ")
+        // Built from the live keymap so hints track rebound keys.
+        let key = |a: Action| {
+            app.config
+                .keys
+                .primary(a)
+                .unwrap_or_else(|| "—".to_string())
+        };
+        format!(
+            " {}/{} chunk{sep}{} split{sep}{} review{sep}{} hide{sep}{} copy{sep}{} help{sep}{} quit ",
+            key(Action::NextChunk),
+            key(Action::PrevChunk),
+            key(Action::ToggleView),
+            key(Action::ToggleReviewed),
+            key(Action::ToggleHidden),
+            key(Action::CopyReference),
+            key(Action::Help),
+            key(Action::Quit),
+        )
     };
 
     // Background first, then the left text. The right-aligned hints are drawn

@@ -62,14 +62,20 @@ reviewed state → AI reference copy, with file filter and help.
 - ✅ **Hide files** (`h` hide / un-hide, `H` hidden-only view): permanently drops a file from
   the review, persisted to `.git/hunkr/hidden.json` (`HiddenStore` in `src/persist.rs`).
   Hidden files leave the sidebar and the `✓`/`●` totals; one predicate drives both views and
-  composes with the filter; survives hot-reload. Default ignore-globs + configurable counter
-  behavior are deferred to the config system (see issues #1/#2).
+  composes with the filter; survives hot-reload.
+- ✅ **Configuration** (TOML at `~/.config/hunkr/config.toml`, `--config` to override):
+  layered defaults + user overrides, fault-tolerant load (malformed → defaults + status-bar
+  warning). Configurable `view` (startup layout), full `[keys]` remap (an `Action` enum +
+  chord→action `KeyMap`, replacing the hardcoded dispatch; help/hints render from the live
+  keymap), and `[hide]` auto-hide rules (exact names + regex) that combine with interactive
+  hides. `C` opens the config in `$EDITOR` (seeding a commented template) and hot-reloads on
+  return. `src/config.rs`; see `docs/CONFIG.md` and ARCHITECTURE → Configuration.
 
 ## Later (not MVP)
 
 Syntax highlighting · minimap · revert/accept-reject chunk ·
 inline AI comments · session history · multi-repo · daemon mode ·
-performance telemetry · config-file keybindings.
+performance telemetry · per-repo (committed) config · theme/color config.
 
 ## Testing
 

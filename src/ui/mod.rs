@@ -4,6 +4,7 @@
 
 mod diff_panel;
 mod help;
+mod notification;
 mod statusbar;
 mod tree_panel;
 
@@ -11,6 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 
 use crate::app::{App, MIN_DIFF_WIDTH, MIN_TREE_WIDTH, Mode};
+use crate::config::Action;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -46,7 +48,18 @@ pub fn render(f: &mut Frame, app: &mut App) {
     statusbar::render(f, status, app);
 
     if app.mode == Mode::Help {
-        help::render(f, area);
+        help::render(f, area, app);
+    }
+
+    // A broken config floats a persistent toast in the top-right corner until a
+    // clean reload clears it; rendered last so it sits above everything.
+    if let Some(err) = &app.config_error {
+        let edit_key = app
+            .config
+            .keys
+            .primary(Action::EditConfig)
+            .unwrap_or_else(|| "C".to_string());
+        notification::render_config_error(f, area, err, &edit_key);
     }
 }
 
