@@ -81,10 +81,12 @@ by index — no `Rc`/pointers).
 - `FileTree { nodes: Vec<TreeNode>, root, visible: Vec<usize> }`; `visible` is the
   flattened, in-order list of on-screen node indices given collapsed state.
 - `App` owns `files`, `tree`, `tree_cursor`, the hydrated `diff` + its flattened
-  `diff_rows` / `chunk_starts`, `scroll`, `current_chunk`, `focus`, and dirty/quit flags.
+  `diff_rows` / `chunk_starts`, the per-chunk `chunk_hashes` / `chunk_collapsed`, `scroll`,
+  `current_chunk`, `focus`, and dirty/quit flags.
 
 `RowRef` (`Header(chunk)` | `Line(chunk, line)`) is the flattened render-row index built
-once on hydration; the diff panel slices a window out of it.
+once on hydration; a collapsed chunk contributes only its `Header` row, so folding is just
+a rebuild of this list. The diff panel slices a window out of it.
 
 ---
 
@@ -108,10 +110,11 @@ once on hydration; the diff panel slices a window out of it.
 ## Rendering & virtualization
 
 The diff panel computes `viewport::visible_range(scroll, height, total)` and renders only
-those `diff_rows` into `Line`s each frame. Headers render bold cyan — except the chunk the
-`n`/`p` cursor is on, which gets a marker, yellow text, and a full-width background fill so
-the current change is obvious; lines render with an `old new ± ` gutter, green/red/gray by
-kind, with tab expansion (`unicode-width`).
+those `diff_rows` into `Line`s each frame. Headers render bold cyan — green with a `✓` when
+the chunk is reviewed (plus a folded-line count when collapsed), and the chunk the `n`/`p`
+cursor is on gets a marker, yellow text, and a full-width background fill so the current
+change is obvious; lines render with an `old new ± ` gutter, green/red/gray by kind (greyed
+when their chunk is reviewed in `"dim"` mode), with tab expansion (`unicode-width`).
 Panel heights are written back into `App` during render so scroll clamping and PageUp/Down
 (and Shift+arrows, which alias them) know the page size; the diff panel's left column
 (`diff_x`) is recorded too so mouse-wheel events route to the panel under the cursor.
@@ -182,17 +185,25 @@ refinement if large single-file diffs ever stutter.
 
 ## Reviewed state
 
-Reviewed status is tied to a **diff hash**, not a filename, and is *derived* (never
-stored): a record whose hash matches the file's current diff hash → `Reviewed ✓`;
-everything else (no record, stale record, or unknown hash) → `Unreviewed ●` (see
-`model/review.rs`). The hash is **seahash** — deterministic across processes, so a hash
+Reviewed status is tracked **per chunk**, keyed by a chunk's **content hash** (its `@@`
+header plus every line), not a filename, and is *derived* (never stored): a file's record
+holds the set of reviewed chunk hashes, and a file reads as `Reviewed ✓` only when *every*
+current chunk hash is in that set, `partly ◐` when some are, `Unreviewed ●` otherwise (see
+`model/review.rs::derive_file`). Files with no chunks (binary, mode-only) fall back to a
+whole-diff hash match. The hash is **seahash** — deterministic across processes, so a hash
 persisted one session still matches the next (the default randomly-seeded hashers would
-not). `r` toggles the record — marking hashes the already-hydrated diff locally (no git
-call), unmarking drops the record; on refresh the git worker recomputes hashes for only the
-reviewed set, which is what makes a changed file fall back to unreviewed. Records persist
-to `.git/hunkr/review.json` via `persist.rs` (versioned `schema`; git dir resolved with
-`rev-parse --absolute-git-dir` for worktree correctness), loaded on startup, rewritten on
-each change.
+not).
+
+`r` toggles the chunk under the cursor: marking hashes the already-hydrated chunk locally
+(no git call), collapses it (the `reviewed_chunks = "collapse"` default; `"dim"` greys it
+instead), and advances to the next unreviewed chunk; `R` toggles the whole file; `o`
+(`expand_all_chunks`) reveals collapsed chunks without changing reviewed state. On refresh
+the git worker re-parses only the reviewed set and returns per-file `FileHashes { whole,
+chunks }`, which is what makes an edited chunk fall back to unreviewed while its neighbours
+stay marked. Records persist to `.git/hunkr/review.json` via `persist.rs` (versioned
+`schema` — bumped to 2, with the new `reviewed_chunks` field defaulting empty so schema-1
+files still load; git dir resolved with `rev-parse --absolute-git-dir` for worktree
+correctness), loaded on startup, rewritten on each change.
 
 ## Hidden files
 

@@ -42,6 +42,22 @@ view = "unified"        # or "side-by-side"
 
 The layout hunkr opens in. You can still toggle at runtime with `s` (`toggle_view`).
 
+### `reviewed_chunks` — how reviewed chunks look
+
+```toml
+reviewed_chunks = "collapse"    # or "dim"
+```
+
+Review is tracked **per chunk** (`r`), not just per file. When you mark a chunk reviewed:
+
+- `"collapse"` (default) folds it to its header line — reviewed work disappears so you can
+  focus on what's left. Press `o` (`expand_all_chunks`) to reveal every chunk again.
+- `"dim"` keeps the chunk's lines visible but greys them out.
+
+A reviewed chunk's header always carries a `✓`. The sidebar shows per-file progress (e.g.
+`2/4`) and a half-filled marker until every chunk is reviewed, at which point the file flips
+to fully reviewed. `R` marks/clears the **whole file** at once.
+
 ### `[hide]` — auto-hide files
 
 Files matched here are dropped from the review automatically, on top of the interactive `h`
@@ -97,7 +113,9 @@ The help overlay (`?`) and the status-bar hints always show your *current* bindi
 | `bottom` | `G` | bottom of diff |
 | `switch_focus` | `tab` | switch tree / diff focus |
 | `activate` | `enter` | expand-collapse folder / focus diff |
-| `toggle_reviewed` | `r` | toggle reviewed |
+| `toggle_reviewed` | `R` | toggle reviewed for the whole file |
+| `toggle_chunk_reviewed` | `r` | toggle reviewed for the current chunk |
+| `expand_all_chunks` | `o` | reveal every collapsed (reviewed) chunk |
 | `toggle_hidden` | `h` | hide / un-hide the selected file |
 | `toggle_hidden_view` | `H` | toggle the hidden-files view |
 | `copy_reference` | `y` | copy AI reference for the chunk |

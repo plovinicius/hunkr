@@ -60,9 +60,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         if let Some(fi) = node.file {
             let file = &app.files[fi];
             let status = app.review_status(fi);
+            let (reviewed, total) = app.reviewed_chunk_count(fi);
+            // ✓ when fully reviewed, a half-circle when only some chunks are,
+            // otherwise the unreviewed dot.
+            let (glyph, glyph_color) = if status == ReviewStatus::Reviewed {
+                (app.glyphs.reviewed, Color::Green)
+            } else if reviewed > 0 {
+                (app.glyphs.partial, Color::Yellow)
+            } else {
+                (app.glyphs.unreviewed, Color::DarkGray)
+            };
             spans.push(Span::styled(
-                format!("{} ", app.glyphs.status(status)),
-                Style::default().fg(status_color(status)),
+                format!("{glyph} "),
+                Style::default().fg(glyph_color),
             ));
             let name = if filtering {
                 file.path.to_string_lossy().into_owned()
@@ -73,6 +83,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw(sanitize(&name)));
             if let Some((suffix, style)) = kind_suffix(&file.kind) {
                 spans.push(Span::styled(suffix, style));
+            }
+            // Per-chunk progress while a file is partway through review.
+            if total > 0 && reviewed > 0 && reviewed < total {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("{reviewed}/{total}"),
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             if file.additions > 0 || file.deletions > 0 {
                 spans.push(Span::raw("  "));
@@ -119,13 +137,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn status_color(status: ReviewStatus) -> Color {
-    match status {
-        ReviewStatus::Reviewed => Color::Green,
-        ReviewStatus::Unreviewed => Color::DarkGray,
-    }
 }
 
 /// A short kind tag for anything other than a plain modification.

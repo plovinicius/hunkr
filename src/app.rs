@@ -18,7 +18,7 @@ use crate::cache::DiffCache;
 use crate::config::{self, Action, Config};
 use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
-use crate::model::review::{self, ReviewStatus};
+use crate::model::review::{self, FileHashes, ReviewStatus};
 use crate::model::{
     diff::{Chunk, FileDiff, LineKind},
     file::{ChangeKind, ChangedFile},
@@ -98,6 +98,15 @@ pub enum ViewMode {
     SideBySide,
 }
 
+/// How a chunk marked reviewed is presented in the diff panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewedDisplay {
+    /// Fold the chunk to its header line (default) — reviewed work disappears.
+    Collapse,
+    /// Keep the chunk's lines visible but dimmed.
+    Dim,
+}
+
 /// One rendered row of the unified diff: a chunk header or a body line
 /// `(chunk, line)`. Built once on hydration; the panel slices a window out.
 #[derive(Clone, Copy)]
@@ -145,12 +154,19 @@ pub struct App {
 
     pub scroll: usize,
     pub current_chunk: usize,
+    /// Per-chunk fold state for the hydrated diff (UI-only, not persisted).
+    /// `true` hides a chunk's body rows, showing only its header. Rebuilt on
+    /// every hydration; reviewed chunks start collapsed in collapse mode.
+    pub chunk_collapsed: Vec<bool>,
+    /// Content hash of each chunk in the hydrated diff, parallel to
+    /// `diff.chunks`. Used to mark/look-up per-chunk reviewed state.
+    pub chunk_hashes: Vec<u64>,
 
-    /// Persisted reviewed-state, keyed by path → diff hash at review time.
+    /// Persisted reviewed-state, keyed by path → reviewed chunk/diff hashes.
     pub review: ReviewStore,
-    /// Current diff hashes for reviewed files (to detect "changed after
+    /// Current diff/chunk hashes for reviewed files (to detect "changed after
     /// review"). Maintained on mark and on each refresh.
-    pub hashes: HashMap<PathBuf, u64>,
+    pub hashes: HashMap<PathBuf, FileHashes>,
 
     /// Persisted set of files hidden from the review. Hidden files are dropped
     /// from the sidebar and excluded from the review counts.
@@ -262,6 +278,8 @@ impl App {
             cache: DiffCache::new(DIFF_CACHE_CAP),
             scroll: 0,
             current_chunk: 0,
+            chunk_collapsed: Vec::new(),
+            chunk_hashes: Vec::new(),
             review,
             hashes: HashMap::new(),
             hidden,
@@ -294,7 +312,28 @@ impl App {
     /// Derived review status for a file (by index into `files`).
     pub fn review_status(&self, file_idx: usize) -> ReviewStatus {
         let path = &self.files[file_idx].path;
-        review::derive(self.review.get(path), self.hashes.get(path).copied())
+        review::derive_file(self.review.get(path), self.hashes.get(path))
+    }
+
+    /// `(reviewed, total)` chunk counts for a file, for the sidebar `n/m` badge.
+    /// Zero/zero when the file has no record or no known hashes yet.
+    pub fn reviewed_chunk_count(&self, file_idx: usize) -> (usize, usize) {
+        let path = &self.files[file_idx].path;
+        let hashes = self.hashes.get(path);
+        let total = hashes.map(|h| h.chunks.len()).unwrap_or(0);
+        let reviewed = review::reviewed_chunk_count(self.review.get(path), hashes);
+        (reviewed, total)
+    }
+
+    /// Whether chunk `h` of the currently hydrated diff is marked reviewed.
+    pub fn chunk_reviewed(&self, h: usize) -> bool {
+        let Some(d) = self.diff.as_ref() else {
+            return false;
+        };
+        let Some(&hash) = self.chunk_hashes.get(h) else {
+            return false;
+        };
+        review::chunk_reviewed(self.review.get(&d.path), hash)
     }
 
     /// Paths that currently have a review record (asked of the git worker so it
@@ -303,37 +342,146 @@ impl App {
         self.review.reviewed_paths()
     }
 
-    /// Diff hash of the currently hydrated file, if any.
-    fn selected_hash(&self) -> Option<u64> {
-        self.diff.as_ref().map(|d| git::diff::hash_text(&d.text))
+    /// The whole-diff + per-chunk hashes of the currently hydrated file.
+    fn current_file_hashes(&self) -> Option<FileHashes> {
+        let d = self.diff.as_ref()?;
+        Some(FileHashes {
+            whole: git::diff::hash_text(&d.text),
+            chunks: self.chunk_hashes.clone(),
+        })
     }
 
-    /// Toggle the reviewed state for the file under the cursor. A reviewed file
-    /// becomes unreviewed; otherwise the current diff hash is recorded as the
-    /// reviewed hash (which also re-affirms a file that changed since last
-    /// review).
+    /// Keep the hydrated file's entry in `hashes` current (so the sidebar `n/m`
+    /// and ✓ update immediately after a mark, without a worker round-trip).
+    fn refresh_current_hashes(&mut self) {
+        let Some(d) = self.diff.as_ref() else {
+            return;
+        };
+        let path = d.path.clone();
+        let whole = git::diff::hash_text(&d.text);
+        let chunks = self.chunk_hashes.clone();
+        if self.review.get(&path).is_some() {
+            self.hashes.insert(path, FileHashes { whole, chunks });
+        } else {
+            self.hashes.remove(&path);
+        }
+    }
+
+    /// Toggle reviewed state for the *current chunk* (the `r` action). Marking a
+    /// chunk collapses it (in collapse mode) and advances to the next unreviewed
+    /// chunk; un-marking re-opens it. Falls back to the whole-file toggle for
+    /// binary/no-chunk files.
+    fn toggle_chunk_reviewed(&mut self) {
+        let Some(d) = self.diff.clone() else {
+            return;
+        };
+        if self.chunk_hashes.is_empty() {
+            self.toggle_reviewed();
+            return;
+        }
+        let h = self.current_chunk.min(self.chunk_hashes.len() - 1);
+        let chunk_hash = self.chunk_hashes[h];
+        let path = d.path.clone();
+        let whole = git::diff::hash_text(&d.text);
+        let now_reviewed = !review::chunk_reviewed(self.review.get(&path), chunk_hash);
+
+        let result = if now_reviewed {
+            self.review
+                .mark_chunk(path.clone(), whole, chunk_hash, unix_now())
+        } else {
+            self.review.unmark_chunk(&path, chunk_hash)
+        };
+        // A failed *persist* still leaves the in-memory state updated, so reflect
+        // it in the UI either way and only surface the save error.
+        if let Err(e) = result {
+            self.error = Some(format!("could not save review state: {e}"));
+        }
+        self.refresh_current_hashes();
+
+        if self.config.reviewed_chunks == ReviewedDisplay::Collapse {
+            if let Some(c) = self.chunk_collapsed.get_mut(h) {
+                *c = now_reviewed;
+            }
+            self.rebuild_rows(&d);
+        }
+        if now_reviewed {
+            self.advance_to_next_unreviewed(h);
+        }
+        self.dirty = true;
+    }
+
+    /// Move the chunk cursor to the first unreviewed chunk after `from`; if there
+    /// is none, stay put.
+    fn advance_to_next_unreviewed(&mut self, from: usize) {
+        let Some(d) = self.diff.clone() else {
+            return;
+        };
+        let n = self.chunk_hashes.len();
+        for idx in (from + 1)..n {
+            let hash = self.chunk_hashes[idx];
+            if !review::chunk_reviewed(self.review.get(&d.path), hash) {
+                self.current_chunk = idx;
+                self.scroll_to_current_chunk();
+                return;
+            }
+        }
+    }
+
+    /// Toggle reviewed state for the whole file under the cursor (the `R`
+    /// action): marks/clears every chunk (and the whole-diff hash for binary
+    /// files), collapsing or revealing all chunks to match.
     fn toggle_reviewed(&mut self) {
         let Some(fi) = self.current_file_index() else {
             return;
         };
         let path = self.files[fi].path.clone();
+        let on_current = self.diff_file == Some(fi);
+        let collapse = self.config.reviewed_chunks == ReviewedDisplay::Collapse;
+
         let result = if self.review_status(fi) == ReviewStatus::Reviewed {
-            self.review.unmark(&path).map(|_| {
-                self.hashes.remove(&path);
-            })
+            let r = self.review.unmark(&path);
+            self.hashes.remove(&path);
+            if on_current {
+                self.set_all_collapsed(false);
+            }
+            r
         } else {
-            let Some(hash) = self.selected_hash() else {
+            let Some(fh) = self.current_file_hashes() else {
                 self.error = Some("no diff to mark reviewed".into());
                 return;
             };
-            self.review.mark(path.clone(), hash, unix_now()).map(|_| {
-                self.hashes.insert(path, hash);
-            })
+            let r = self
+                .review
+                .mark(path.clone(), fh.whole, fh.chunks.clone(), unix_now());
+            self.hashes.insert(path, fh);
+            if on_current && collapse {
+                self.set_all_collapsed(true);
+            }
+            r
         };
         if let Err(e) = result {
             self.error = Some(format!("could not save review state: {e}"));
         }
         self.dirty = true;
+    }
+
+    /// Reveal every collapsed chunk in the current file without changing reviewed
+    /// state (the `o` action). Reviewed chunks keep their ✓ marker.
+    fn expand_all_chunks(&mut self) {
+        if self.chunk_collapsed.iter().any(|c| *c) {
+            self.set_all_collapsed(false);
+            self.dirty = true;
+        }
+    }
+
+    /// Set every chunk's collapse flag and rebuild the render rows.
+    fn set_all_collapsed(&mut self, collapsed: bool) {
+        for c in self.chunk_collapsed.iter_mut() {
+            *c = collapsed;
+        }
+        if let Some(d) = self.diff.clone() {
+            self.rebuild_rows(&d);
+        }
     }
 
     // ── hidden state ─────────────────────────────────────────────────────────
@@ -685,6 +833,33 @@ impl App {
     fn adopt_diff(&mut self, fi: usize, diff: Arc<FileDiff>) {
         self.files[fi].additions = diff.additions();
         self.files[fi].deletions = diff.deletions();
+
+        // Per-chunk content hashes, then the collapse state: reviewed chunks
+        // start collapsed in collapse mode.
+        self.chunk_hashes = diff
+            .chunks
+            .iter()
+            .map(|c| git::diff::hash_chunk(&diff, c))
+            .collect();
+        let path = self.files[fi].path.clone();
+        let collapse = self.config.reviewed_chunks == ReviewedDisplay::Collapse;
+        let record = self.review.get(&path);
+        self.chunk_collapsed = self
+            .chunk_hashes
+            .iter()
+            .map(|h| collapse && review::chunk_reviewed(record, *h))
+            .collect();
+        // Keep this file's hashes current so its ✓/`n/m` is right immediately.
+        if record.is_some() {
+            let fh = FileHashes {
+                whole: git::diff::hash_text(&diff.text),
+                chunks: self.chunk_hashes.clone(),
+            };
+            self.hashes.insert(path, fh);
+        } else {
+            self.hashes.remove(&path);
+        }
+
         self.rebuild_rows(&diff);
         self.diff = Some(diff);
         self.diff_file = Some(fi);
@@ -699,34 +874,37 @@ impl App {
         self.chunk_starts.clear();
         self.side_rows.clear();
         self.side_chunk_starts.clear();
+        self.chunk_collapsed.clear();
+        self.chunk_hashes.clear();
     }
 
     /// Inject an already-parsed diff (rendering tests use this to exercise the
-    /// diff panel without shelling out to git).
+    /// diff panel without shelling out to git). Routes through [`Self::adopt_diff`]
+    /// so per-chunk hashes and collapse state are populated as in normal use.
     #[cfg(test)]
     pub(crate) fn set_diff_for_test(&mut self, fd: FileDiff) {
-        let diff = Arc::new(fd);
-        self.rebuild_rows(&diff);
-        self.diff = Some(diff);
-        self.diff_file = Some(0);
+        self.adopt_diff(0, Arc::new(fd));
         self.focus = Focus::Diff;
     }
 
     fn rebuild_rows(&mut self, fd: &FileDiff) {
-        // Unified rows: header followed by each body line.
+        // Unified rows: header followed by each body line. A collapsed chunk
+        // contributes only its header row.
         let mut rows = Vec::new();
         let mut starts = Vec::with_capacity(fd.chunks.len());
         for (h, chunk) in fd.chunks.iter().enumerate() {
             starts.push(rows.len());
             rows.push(RowRef::Header(h));
-            for l in 0..chunk.lines.len() {
-                rows.push(RowRef::Line(h, l));
+            if !self.chunk_collapsed.get(h).copied().unwrap_or(false) {
+                for l in 0..chunk.lines.len() {
+                    rows.push(RowRef::Line(h, l));
+                }
             }
         }
         self.diff_rows = rows;
         self.chunk_starts = starts;
 
-        let (side_rows, side_starts) = build_side_rows(fd);
+        let (side_rows, side_starts) = build_side_rows(fd, &self.chunk_collapsed);
         self.side_rows = side_rows;
         self.side_chunk_starts = side_starts;
     }
@@ -1059,6 +1237,8 @@ impl App {
             }
             Activate => self.activate(),
             ToggleReviewed => self.toggle_reviewed(),
+            ToggleChunkReviewed => self.toggle_chunk_reviewed(),
+            ExpandAllChunks => self.expand_all_chunks(),
             ToggleHidden => self.toggle_hidden(),
             ToggleHiddenView => self.toggle_hidden_view(),
             CopyReference => self.copy_reference(),
@@ -1120,13 +1300,17 @@ fn first_line_no(chunk: &Chunk) -> Option<u32> {
 /// lines appear on both sides; a run of deletions is paired row-for-row with
 /// the run of additions that follows it (extra lines on either side get an
 /// empty cell on the other). Returns the rows and each chunk header's row index.
-fn build_side_rows(fd: &FileDiff) -> (Vec<SideRow>, Vec<usize>) {
+fn build_side_rows(fd: &FileDiff, collapsed: &[bool]) -> (Vec<SideRow>, Vec<usize>) {
     let mut rows = Vec::new();
     let mut starts = Vec::with_capacity(fd.chunks.len());
 
     for (h, chunk) in fd.chunks.iter().enumerate() {
         starts.push(rows.len());
         rows.push(SideRow::Header(h));
+
+        if collapsed.get(h).copied().unwrap_or(false) {
+            continue;
+        }
 
         let lines = &chunk.lines;
         let mut i = 0;
@@ -1494,7 +1678,7 @@ mod tests {
             "+new3\n",
         );
         let fd = parse_unified(Arc::from(raw), PathBuf::from("x"));
-        let (rows, starts) = build_side_rows(&fd);
+        let (rows, starts) = build_side_rows(&fd, &[]);
 
         assert_eq!(starts, vec![0]);
         assert!(matches!(rows[0], SideRow::Header(0)));
@@ -1543,6 +1727,85 @@ mod tests {
         a.on_key(key('e'));
         assert!(a.take_editor_request().is_none());
         assert!(a.error.is_some());
+    }
+
+    /// A single-file app whose diff has three independent chunks.
+    fn multi_chunk_app() -> App {
+        use crate::git::diff::parse_unified;
+        use std::sync::Arc;
+
+        let mut a = app(vec![file("src/foo.rs")]);
+        a.tree_cursor = a.cursor_for_path(Path::new("src/foo.rs")).unwrap();
+        let raw = "@@ -1,2 +1,2 @@\n a\n-b\n+B\n\
+                   @@ -10,2 +10,2 @@\n c\n-d\n+D\n\
+                   @@ -20,2 +20,2 @@\n e\n-f\n+F\n";
+        a.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("src/foo.rs")));
+        a
+    }
+
+    #[test]
+    fn r_marks_current_chunk_collapses_it_and_advances() {
+        let mut a = multi_chunk_app();
+        assert_eq!(a.current_chunk, 0);
+
+        a.on_key(key('r'));
+
+        assert!(a.chunk_reviewed(0), "chunk 0 should be reviewed");
+        assert!(a.chunk_collapsed[0], "reviewed chunk collapses by default");
+        assert_eq!(a.current_chunk, 1, "cursor advances to the next chunk");
+        assert_eq!(
+            a.review_status(0),
+            ReviewStatus::Unreviewed,
+            "file isn't done until every chunk is reviewed"
+        );
+        assert_eq!(a.reviewed_chunk_count(0), (1, 3));
+    }
+
+    #[test]
+    fn reviewing_every_chunk_completes_the_file() {
+        let mut a = multi_chunk_app();
+        a.on_key(key('r'));
+        a.on_key(key('r'));
+        a.on_key(key('r'));
+
+        assert_eq!(a.review_status(0), ReviewStatus::Reviewed);
+        assert_eq!(a.reviewed_chunk_count(0), (3, 3));
+    }
+
+    #[test]
+    fn capital_r_toggles_the_whole_file() {
+        let mut a = multi_chunk_app();
+
+        a.on_key(key('R'));
+        assert_eq!(a.review_status(0), ReviewStatus::Reviewed);
+        assert!(a.chunk_collapsed.iter().all(|c| *c), "all chunks collapse");
+
+        a.on_key(key('R'));
+        assert_eq!(a.review_status(0), ReviewStatus::Unreviewed);
+        assert!(
+            a.chunk_collapsed.iter().all(|c| !*c),
+            "un-marking reveals every chunk"
+        );
+    }
+
+    #[test]
+    fn o_expands_all_chunks_without_unreviewing() {
+        let mut a = multi_chunk_app();
+        a.on_key(key('R')); // mark whole file → everything collapses
+        assert!(a.chunk_collapsed.iter().all(|c| *c));
+
+        a.on_key(key('o'));
+
+        assert!(
+            a.chunk_collapsed.iter().all(|c| !*c),
+            "expand-all reveals every chunk"
+        );
+        assert_eq!(
+            a.review_status(0),
+            ReviewStatus::Reviewed,
+            "expanding must not change reviewed state"
+        );
+        assert!(a.chunk_reviewed(0));
     }
 
     #[test]

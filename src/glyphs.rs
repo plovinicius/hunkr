@@ -3,11 +3,11 @@
 //! symbols. This is the single source of truth for every non-text marker the
 //! UI draws.
 
-use crate::model::review::ReviewStatus;
-
 #[derive(Debug, Clone, Copy)]
 pub struct Glyphs {
     pub reviewed: &'static str,
+    /// Some — but not all — of a file's chunks are reviewed.
+    pub partial: &'static str,
     pub unreviewed: &'static str,
     pub folder_open: char,
     pub folder_closed: char,
@@ -28,6 +28,7 @@ impl Glyphs {
     pub fn ascii() -> Self {
         Glyphs {
             reviewed: "[x]",
+            partial: "[~]",
             unreviewed: "[ ]",
             folder_open: 'v',
             folder_closed: '>',
@@ -45,6 +46,7 @@ impl Glyphs {
             // will swallow the following space and misalign the row. `↻`/`⚠` are
             // frequently rendered double-width, so we avoid them.
             reviewed: "✓",
+            partial: "◐",
             unreviewed: "●",
             folder_open: '▾',
             folder_closed: '▸',
@@ -53,14 +55,6 @@ impl Glyphs {
             sep: " · ",
             dash: "—",
             chunk_bar: '▌',
-        }
-    }
-
-    /// The marker for a review status.
-    pub fn status(&self, status: ReviewStatus) -> &'static str {
-        match status {
-            ReviewStatus::Reviewed => self.reviewed,
-            ReviewStatus::Unreviewed => self.unreviewed,
         }
     }
 }
