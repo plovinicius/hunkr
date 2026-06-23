@@ -1,6 +1,9 @@
-//! Floating top-right notification. Currently used for the persistent config
-//! error: it stays pinned in the corner (over the diff panel) until the config
-//! is fixed, so it doesn't have to fight the status bar for the bottom row.
+//! Floating top-right notifications. Two callers today:
+//! - the **persistent** config-error toast (red, stays until the config is fixed)
+//! - a **transient** toast (green) for quick acknowledgements like "copied for AI"
+//!
+//! Both anchor to the top-right corner and stack downward, so a copy toast that
+//! fires while the config is broken sits just below the error box.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -10,56 +13,86 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::render::sanitize;
 
-/// Draw the config-error toast in the top-right corner of `area`. `edit_key` is
-/// the chord bound to "edit config" (so the hint tracks a rebind).
-pub fn render_config_error(f: &mut Frame, area: Rect, message: &str, edit_key: &str) {
-    // A 1-cell inset from the top-right edge.
-    let margin = 1u16;
-    let width = 50u16.min(area.width.saturating_sub(margin + 1));
-    // Too cramped to draw a useful box — skip rather than render garbage.
-    if width < 16 || area.height < 6 {
-        return;
-    }
+const MARGIN: u16 = 1;
+const MAX_WIDTH: u16 = 50;
 
-    let wrap_w = (width as usize).saturating_sub(4).max(1); // borders + 1-col padding
-    let body = sanitize(message);
-    let hint = format!("press {edit_key} to edit · fix to dismiss");
-
-    let mut lines: Vec<Line> = wrap(&body, wrap_w)
+/// Draw the persistent config-error toast starting at `top_y`. Returns the `y`
+/// just below it (for stacking), or `top_y` unchanged if it didn't fit.
+pub fn render_config_error(
+    f: &mut Frame,
+    area: Rect,
+    top_y: u16,
+    message: &str,
+    edit_key: &str,
+) -> u16 {
+    let width = box_width(area);
+    let wrap_w = wrap_width(width);
+    let mut body: Vec<Line> = wrap(&sanitize(message), wrap_w)
         .into_iter()
         .map(|l| Line::from(format!(" {l}")))
         .collect();
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(" {hint}"),
+    body.push(Line::raw(""));
+    body.push(Line::styled(
+        format!(" press {edit_key} to edit · fix to dismiss"),
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
     ));
+    draw(f, area, top_y, " ⚠ Config error ", Color::Red, body)
+}
 
-    let height = (lines.len() as u16 + 2).min(area.height); // + top/bottom border
+/// Draw a transient toast (green) starting at `top_y`.
+pub fn render_toast(f: &mut Frame, area: Rect, top_y: u16, text: &str) -> u16 {
+    let width = box_width(area);
+    let wrap_w = wrap_width(width);
+    let body: Vec<Line> = wrap(&sanitize(text), wrap_w)
+        .into_iter()
+        .map(|l| Line::from(format!(" {l}")))
+        .collect();
+    draw(f, area, top_y, " ✓ Copied ", Color::Green, body)
+}
+
+/// Render a bordered box of `body` lines in the top-right, titled and colored.
+/// Returns the `y` immediately below it (plus a one-row gap) for stacking.
+fn draw(f: &mut Frame, area: Rect, top_y: u16, title: &str, accent: Color, body: Vec<Line>) -> u16 {
+    let width = box_width(area);
+    let bottom = area.y + area.height;
+    if width < 16 || top_y + 4 > bottom {
+        return top_y; // too small / no vertical room — skip
+    }
+    let height = (body.len() as u16 + 2).min(bottom - top_y);
     let rect = Rect {
-        x: area.x + area.width.saturating_sub(width + margin),
-        y: area.y + margin,
+        x: area.x + area.width.saturating_sub(width + MARGIN),
+        y: top_y,
         width,
         height,
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
+        .border_style(Style::default().fg(accent))
         .title(Span::styled(
-            " ⚠ Config error ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            title.to_string(),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
 
     f.render_widget(Clear, rect);
     f.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(body)
             .block(block)
             .style(Style::default().bg(Color::Indexed(236)).fg(Color::White)),
         rect,
     );
+
+    top_y + height + 1
+}
+
+fn box_width(area: Rect) -> u16 {
+    MAX_WIDTH.min(area.width.saturating_sub(MARGIN + 1))
+}
+
+fn wrap_width(width: u16) -> usize {
+    (width as usize).saturating_sub(4).max(1) // borders + 1-col padding
 }
 
 /// Greedy word-wrap by display columns (char count is fine here — the message is

@@ -85,7 +85,8 @@ flags the hidden view.
 
 Reviewed state persists in `.git/hunkr/review.json`, and the hidden set in
 `.git/hunkr/hidden.json` (both per repo/worktree, never tracked).
-Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH. `e` opens
+Clipboard copy uses the system clipboard with an OSC 52 fallback for tmux/SSH, and a brief
+top-right `✓ Copied` toast confirms it (auto-dismissing after a moment). `e` opens
 `$VISUAL`/`$EDITOR` (falling back to `vi`), jumping to the line for editors that accept
 `+LINE` (vi/vim/nvim/nano/emacs/kak); the diff refreshes automatically when you save.
 

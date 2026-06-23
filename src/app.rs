@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
@@ -45,6 +45,11 @@ pub const MIN_DIFF_WIDTH: u16 = 20;
 /// Columns the sidebar grows/shrinks per `>` / `<` keypress.
 const TREE_RESIZE_STEP: u16 = 2;
 
+/// How long a transient toast (e.g. "copied for AI") stays up before it
+/// auto-dismisses. Kept short — it's a flash acknowledgement, not a message to
+/// read. The run loop's 100ms input poll bounds the dismissal resolution.
+const TOAST_TTL: Duration = Duration::from_millis(900);
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,6 +80,13 @@ pub enum Mode {
 pub struct EditorRequest {
     pub path: PathBuf,
     pub line: u32,
+}
+
+/// A transient top-right toast that auto-dismisses once `expires_at` passes
+/// (see [`App::expire_toast`]). Used for quick acknowledgements like "copied".
+pub struct Toast {
+    pub text: String,
+    pub expires_at: Instant,
 }
 
 /// How the diff panel lays out a file's changes.
@@ -191,6 +203,10 @@ pub struct App {
     /// hunkr keeps running on the built-in defaults and shows this until a clean
     /// reload clears it. Unlike `status_msg`, it survives keypresses.
     pub config_error: Option<String>,
+
+    /// A *transient* top-right toast (e.g. "copied for AI") that auto-dismisses
+    /// after [`TOAST_TTL`]; the run loop calls [`Self::expire_toast`] to clear it.
+    pub toast: Option<Toast>,
 }
 
 impl App {
@@ -269,6 +285,7 @@ impl App {
             config_path: Config::default_path().unwrap_or_default(),
             pending_config_edit: false,
             config_error: None,
+            toast: None,
         }
     }
 
@@ -416,10 +433,33 @@ impl App {
             }
         };
         match crate::reference::copy(&text) {
-            Ok(method) => self.status_msg = Some(format!("copied reference via {method}")),
+            Ok(method) => self.show_toast(format!("AI reference · {method}")),
             Err(e) => self.error = Some(format!("copy failed: {e}")),
         }
         self.dirty = true;
+    }
+
+    /// Flash a transient top-right toast for [`TOAST_TTL`].
+    fn show_toast(&mut self, text: String) {
+        self.toast = Some(Toast {
+            text,
+            expires_at: Instant::now() + TOAST_TTL,
+        });
+        self.dirty = true;
+    }
+
+    /// Clear the toast once its lifetime has elapsed. Called from the run loop,
+    /// which wakes at least every input-poll interval, so the toast dismisses on
+    /// its own without any user action.
+    pub fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|t| Instant::now() >= t.expires_at)
+        {
+            self.toast = None;
+            self.dirty = true;
+        }
     }
 
     // ── open in editor ─────────────────────────────────────────────────────
@@ -1297,6 +1337,29 @@ mod tests {
             "hidden file must not reappear after toggling its folder"
         );
         assert!(visible_paths(&a).contains(&PathBuf::from("src/b.rs")));
+    }
+
+    #[test]
+    fn toast_shows_then_auto_expires() {
+        let mut a = app(vec![file("a.rs")]);
+        a.show_toast("copied".into());
+        assert!(a.toast.is_some());
+
+        // Not yet expired → expire_toast leaves it in place.
+        a.expire_toast();
+        assert!(
+            a.toast.is_some(),
+            "a live toast must not be dismissed early"
+        );
+
+        // Force the deadline into the past; the next tick clears it and repaints.
+        a.dirty = false;
+        if let Some(t) = &mut a.toast {
+            t.expires_at = Instant::now() - Duration::from_millis(1);
+        }
+        a.expire_toast();
+        assert!(a.toast.is_none(), "an elapsed toast must auto-dismiss");
+        assert!(a.dirty, "dismissing a toast must request a repaint");
     }
 
     #[test]

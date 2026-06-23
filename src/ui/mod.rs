@@ -51,15 +51,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
         help::render(f, area, app);
     }
 
-    // A broken config floats a persistent toast in the top-right corner until a
-    // clean reload clears it; rendered last so it sits above everything.
+    // Top-right toasts, rendered last so they sit above everything and stack
+    // downward: the persistent config error (until fixed), then the transient
+    // toast (e.g. "copied for AI", which auto-dismisses).
+    let mut next_y = area.y + 1;
     if let Some(err) = &app.config_error {
         let edit_key = app
             .config
             .keys
             .primary(Action::EditConfig)
             .unwrap_or_else(|| "C".to_string());
-        notification::render_config_error(f, area, err, &edit_key);
+        next_y = notification::render_config_error(f, area, next_y, err, &edit_key);
+    }
+    if let Some(toast) = &app.toast {
+        notification::render_toast(f, area, next_y, &toast.text);
     }
 }
 

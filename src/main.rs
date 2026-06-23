@@ -128,6 +128,10 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
         if app.take_config_edit_request() {
             open_config(tui, app)?;
         }
+
+        // Auto-dismiss a transient toast once its lifetime elapses. The poll
+        // above bounds how often this runs, so the toast clears on its own.
+        app.expire_toast();
     }
     Ok(())
 }

@@ -61,7 +61,7 @@ ui/
   diff_panel.rs  right panel: virtualized stacked diff
   statusbar.rs   bottom bar: context + key hints
   help.rs        centered help overlay (keys read from the live keymap)
-  notification.rs top-right toast (persistent config-error)
+  notification.rs top-right toasts (persistent config-error + transient "copied")
 ```
 
 ---
@@ -142,13 +142,17 @@ loop {
         Error     => flash in status bar,
     }
     if let Some(req) = app.take_editor_request() { open_editor(req); }
+    if app.take_config_edit_request() { open_config(); }
+    app.expire_toast();                     // auto-dismiss a transient toast
     if app.should_quit { break; }
 }
 ```
 
 `POLL_INTERVAL` (~100ms) only bounds how soon background refreshes are noticed; input
 latency is unaffected (poll wakes immediately on a key). Idle cost is one cheap poll per
-interval.
+interval. That same idle wake-up is what auto-dismisses a transient toast: because the loop
+turns over at least every `POLL_INTERVAL`, `expire_toast` clears an elapsed `Toast` (and
+marks the frame dirty) without any timer thread — dismissal resolution is one poll interval.
 
 ## Open in editor
 
@@ -217,7 +221,9 @@ limitation. See [Configuration](#configuration).
 `y` on a chunk builds an AI-ready prompt (file, change #, new-file line range, the exact
 raw diff snippet, and an `Issue:` slot) in `src/reference.rs` and copies it via `arboard`,
 falling back to an **OSC 52** terminal escape (with a built-in base64 encoder) so it works
-over tmux/SSH where there's no local display. The status bar reports which path was used.
+over tmux/SSH where there's no local display. A brief green **toast** (`✓ Copied`, top-right)
+confirms it and which path was used, then **auto-dismisses** (`App::show_toast` sets a
+`Toast { expires_at }`; the run loop's `App::expire_toast` clears it — see [Event loop](#event-loop)).
 The line range is derived from the chunk's actual line numbers; the snippet is sliced
 byte-for-byte from the backing diff text.
 
