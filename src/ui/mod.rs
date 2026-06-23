@@ -347,7 +347,7 @@ mod tests {
         let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
         app.mode = Mode::Help;
 
-        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
         term.draw(|f| render(f, &mut app)).unwrap();
         let text = buffer_text(&term);
 
