@@ -22,9 +22,15 @@ input and avoids surprises from untrusted repos.)
 ## Editing it
 
 Press **`C`** (the `edit_config` action) inside hunkr. It opens the config in your
-`$VISUAL`/`$EDITOR`, creating a fully-commented template on first use, and **hot-reloads**
-the moment you save and exit — no restart needed. (The diff view you're currently in is left
+`$VISUAL`/`$EDITOR`, creating a commented template on first use, and **hot-reloads** the
+moment you save and exit — no restart needed. (The diff view you're currently in is left
 as-is on reload; only the keymap and hide rules re-apply.)
+
+The template's `[keys]` block lists every action with its **current default**, generated from
+the binary so it's always accurate — commented out, because those defaults are already in
+effect (the file only needs the lines you actually change). The defaults are also baked into
+hunkr regardless of the file, so deleting or commenting a line never disables a shortcut. To
+see the live bindings at any time (including your own rebinds), press `?` for the help overlay.
 
 ## Options
 

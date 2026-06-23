@@ -61,9 +61,40 @@ pub enum Action {
 }
 
 impl Action {
+    /// Every action, in display order — drives the generated config template
+    /// and the help overlay row order.
+    pub const ALL: [Action; 24] = {
+        use Action::*;
+        [
+            ScrollDown,
+            ScrollUp,
+            PageDown,
+            PageUp,
+            NextChunk,
+            PrevChunk,
+            NextFile,
+            PrevFile,
+            NarrowSidebar,
+            WidenSidebar,
+            ToggleView,
+            Top,
+            Bottom,
+            SwitchFocus,
+            Activate,
+            ToggleReviewed,
+            ToggleHidden,
+            ToggleHiddenView,
+            CopyReference,
+            OpenEditor,
+            EditConfig,
+            StartFilter,
+            Help,
+            Quit,
+        ]
+    };
+
     /// The snake_case name used as the config `[keys]` table key. The inverse
-    /// of [`Action::from_name`]; kept in tests to guard the name table.
-    #[cfg(test)]
+    /// of [`Action::from_name`].
     pub fn name(self) -> &'static str {
         use Action::*;
         match self {
@@ -333,10 +364,41 @@ impl Config {
     }
 
     /// The commented template written to disk the first time the user opens the
-    /// config (when no file exists yet).
-    pub fn default_template() -> &'static str {
-        include_str!("config_template.toml")
+    /// config (when no file exists yet). The static prose is followed by a
+    /// **generated** `[keys]` block listing every action with its real default
+    /// chords, so the documented defaults can never drift from the code.
+    pub fn default_template() -> String {
+        let mut s = String::from(include_str!("config_template.toml"));
+        s.push_str(&default_keys_doc());
+        s
     }
+}
+
+/// Build the commented `[keys]` reference block from the live default keymap.
+/// Each line is `# <action> = <chord(s)>`, ready to uncomment and edit.
+fn default_keys_doc() -> String {
+    let km = KeyMap::defaults();
+    let width = Action::ALL
+        .iter()
+        .map(|a| a.name().len())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::from("# [keys]\n");
+    for action in Action::ALL {
+        let chords = km.chords_for(action);
+        let value = match chords.as_slice() {
+            [one] => format!("\"{one}\""),
+            many => {
+                let quoted: Vec<String> = many.iter().map(|c| format!("\"{c}\"")).collect();
+                format!("[{}]", quoted.join(", "))
+            }
+        };
+        out.push_str(&format!(
+            "# {name:<width$} = {value}\n",
+            name = action.name()
+        ));
+    }
+    out
 }
 
 // ── raw (on-disk) shapes ───────────────────────────────────────────────────
@@ -518,39 +580,41 @@ mod tests {
 
     #[test]
     fn action_names_round_trip() {
-        use Action::*;
         // Every action's canonical name parses back to the same action. This
         // also guards the [keys] table keys documented in the template.
-        for a in [
-            ScrollDown,
-            ScrollUp,
-            PageDown,
-            PageUp,
-            NextChunk,
-            PrevChunk,
-            NextFile,
-            PrevFile,
-            NarrowSidebar,
-            WidenSidebar,
-            ToggleView,
-            Top,
-            Bottom,
-            SwitchFocus,
-            Activate,
-            ToggleReviewed,
-            ToggleHidden,
-            ToggleHiddenView,
-            CopyReference,
-            OpenEditor,
-            EditConfig,
-            StartFilter,
-            Help,
-            Quit,
-        ] {
+        for a in Action::ALL {
             assert_eq!(
                 Action::from_name(a.name()),
                 Some(a),
                 "name round-trip for {a:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_documents_every_action_default() {
+        // The generated template lists every action with its *real* default
+        // chords, so the documented defaults can't drift from the code.
+        let template = Config::default_template();
+        // Collapse each line's runs of whitespace so the column padding in the
+        // generated block doesn't matter to the comparison.
+        let normalized: Vec<String> = template
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        let km = KeyMap::default();
+        for a in Action::ALL {
+            let chords = km.chords_for(a);
+            let value = if chords.len() == 1 {
+                format!("\"{}\"", chords[0])
+            } else {
+                let quoted: Vec<String> = chords.iter().map(|c| format!("\"{c}\"")).collect();
+                format!("[{}]", quoted.join(", "))
+            };
+            let line = format!("# {} = {value}", a.name());
+            assert!(
+                normalized.contains(&line),
+                "template missing default line: `{line}`"
             );
         }
     }
@@ -672,7 +736,7 @@ mod tests {
 
     #[test]
     fn template_parses_cleanly() {
-        let path = write_tmp("template", Config::default_template());
+        let path = write_tmp("template", &Config::default_template());
         let (_cfg, warns) = Config::load(&path);
         assert!(
             warns.is_empty(),

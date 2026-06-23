@@ -40,7 +40,7 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 main.rs          entry: CLI parse → repo discover → config load → App::new → terminal guard → run loop
 cli.rs           clap args (optional repo path, --ascii, --config)
 config.rs        user config (TOML): Config, Action enum, KeyMap, HideRules, chord parser
-config_template.toml  commented template written on first `edit config`
+config_template.toml  static prose for the template (the [keys] block is generated)
 event.rs         background Event enum + git-worker thread feeding the channel
 terminal.rs      raw mode + alternate screen + mouse capture + panic-hook restore
 app.rs           App state (single source of truth) + update/navigation/keymap dispatch
@@ -300,10 +300,17 @@ Three things are configurable (`src/config.rs`):
   [Hidden files](#hidden-files)).
 
 **Edit config** (`C` by default) suspends the TUI and opens the config in `$EDITOR` (reusing
-`main.rs`'s editor-suspend path), writing the commented template (`config_template.toml`) on
-first use, then **hot-reloads**: `App::reload_config` rebuilds the keymap and hide rules and
-recomputes the sidebar live. The current diff view is intentionally left unchanged so a
-reload doesn't yank the user out of their layout.
+`main.rs`'s editor-suspend path), writing the commented template on first use, then
+**hot-reloads**: `App::reload_config` rebuilds the keymap and hide rules and recomputes the
+sidebar live. The current diff view is intentionally left unchanged so a reload doesn't yank
+the user out of their layout.
+
+`Config::default_template` is the static prose in `config_template.toml` **plus a generated
+`[keys]` block** built from `KeyMap::defaults()` (via `Action::ALL` + `chord_to_string`), so
+the defaults shown in a fresh config are always the real ones — a test asserts every action's
+default line is present, so the doc can't drift from the code. Discoverability of defaults is
+thus three-way: the generated template comments, the `?` help overlay (live keymap, reflects
+rebinds), and `docs/CONFIG.md`.
 
 ---
 
