@@ -58,6 +58,7 @@ pub enum Action {
     OpenEditor,
     EditConfig,
     StartFilter,
+    OpenThemePicker,
     Help,
     Quit,
 }
@@ -65,7 +66,7 @@ pub enum Action {
 impl Action {
     /// Every action, in display order — drives the generated config template
     /// and the help overlay row order.
-    pub const ALL: [Action; 26] = {
+    pub const ALL: [Action; 27] = {
         use Action::*;
         [
             ScrollDown,
@@ -92,6 +93,7 @@ impl Action {
             OpenEditor,
             EditConfig,
             StartFilter,
+            OpenThemePicker,
             Help,
             Quit,
         ]
@@ -126,6 +128,7 @@ impl Action {
             OpenEditor => "open_editor",
             EditConfig => "edit_config",
             StartFilter => "start_filter",
+            OpenThemePicker => "open_theme_picker",
             Help => "help",
             Quit => "quit",
         }
@@ -158,6 +161,7 @@ impl Action {
             "open_editor" => OpenEditor,
             "edit_config" => EditConfig,
             "start_filter" => StartFilter,
+            "open_theme_picker" => OpenThemePicker,
             "help" => Help,
             "quit" => Quit,
             _ => return None,
@@ -208,6 +212,7 @@ impl KeyMap {
             ((Char('e'), n), A::OpenEditor),
             ((Char('C'), n), A::EditConfig),
             ((Char('/'), n), A::StartFilter),
+            ((Char('T'), n), A::OpenThemePicker),
             ((Char('?'), n), A::Help),
             ((Char('q'), n), A::Quit),
             ((Char('c'), ctrl), A::Quit),
@@ -282,12 +287,34 @@ impl HideRules {
     }
 }
 
+/// Syntax-highlighting settings (the `[theme]` table).
+pub struct ThemeConfig {
+    /// Master on/off for source-code syntax highlighting.
+    pub syntax: bool,
+    /// Selected theme name (a bundled bat theme or a user `.tmTheme`).
+    pub theme: String,
+    /// Skip highlighting a file whose diff has more than this many lines, so a
+    /// giant generated-file diff can't make selection feel sluggish.
+    pub max_lines: usize,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        ThemeConfig {
+            syntax: true,
+            theme: crate::highlight::DEFAULT_THEME.to_string(),
+            max_lines: 5000,
+        }
+    }
+}
+
 /// The fully-resolved configuration the app runs against.
 pub struct Config {
     pub view: ViewMode,
     pub reviewed_chunks: ReviewedDisplay,
     pub keys: KeyMap,
     pub hide: HideRules,
+    pub theme: ThemeConfig,
 }
 
 impl Default for Config {
@@ -297,6 +324,7 @@ impl Default for Config {
             reviewed_chunks: ReviewedDisplay::Collapse,
             keys: KeyMap::default(),
             hide: HideRules::default(),
+            theme: ThemeConfig::default(),
         }
     }
 }
@@ -350,6 +378,25 @@ impl Config {
                 None => warnings.push(format!(
                     "unknown view `{v}` (use \"unified\" or \"side-by-side\")"
                 )),
+            }
+        }
+
+        if let Some(t) = raw.theme {
+            if let Some(on) = t.syntax {
+                cfg.theme.syntax = on;
+            }
+            if let Some(max) = t.max_lines {
+                cfg.theme.max_lines = max;
+            }
+            if let Some(name) = t.theme {
+                if crate::highlight::theme_exists(&name) {
+                    cfg.theme.theme = name;
+                } else {
+                    warnings.push(format!(
+                        "unknown theme `{name}` (using `{}`)",
+                        cfg.theme.theme
+                    ));
+                }
             }
         }
 
@@ -428,10 +475,18 @@ fn default_keys_doc() -> String {
 struct RawConfig {
     view: Option<String>,
     reviewed_chunks: Option<String>,
+    theme: Option<RawTheme>,
     #[serde(default)]
     hide: RawHide,
     #[serde(default)]
     keys: BTreeMap<String, ChordSpec>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawTheme {
+    syntax: Option<bool>,
+    theme: Option<String>,
+    max_lines: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]

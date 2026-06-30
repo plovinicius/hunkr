@@ -6,6 +6,7 @@ mod diff_panel;
 mod help;
 mod notification;
 mod statusbar;
+mod theme_picker;
 mod tree_panel;
 
 use ratatui::Frame;
@@ -49,6 +50,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 
     if app.mode == Mode::Help {
         help::render(f, area, app);
+    }
+    if app.mode == Mode::ThemePicker {
+        theme_picker::render(f, area, app);
     }
 
     // Top-right toasts, rendered last so they sit above everything and stack
@@ -336,6 +340,106 @@ mod tests {
             !text.contains("keep.rs"),
             "hidden view should not show shown files:\n{text}"
         );
+    }
+
+    #[test]
+    fn syntax_highlighting_colours_code_and_tints_added_lines() {
+        use crate::git::diff::parse_unified;
+        use ratatui::style::Color;
+        use std::sync::Arc;
+
+        let files = vec![ChangedFile::new(
+            PathBuf::from("foo.rs"),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        // Force truecolor so syntax colours are exact RGB, independent of $COLORTERM.
+        app.truecolor = true;
+        let raw = concat!(
+            "@@ -1,2 +1,2 @@\n",
+            " fn main() {\n",
+            "-    let x = 1;\n",
+            "+    let y = compute();\n",
+        );
+        app.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
+        assert!(
+            app.highlight.is_some(),
+            "highlighting should be on by default"
+        );
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let area = *buf.area();
+
+        // Find the screen row that renders the added line.
+        let mut added_row = None;
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    line.push_str(c.symbol());
+                }
+            }
+            if line.contains("compute") {
+                added_row = Some(y);
+                break;
+            }
+        }
+        let y = added_row.expect("added line should be rendered");
+
+        // The added line's code cells carry the faint green tint background, and
+        // the code shows more than one foreground colour (syntax tokens).
+        let mut fg_colours = std::collections::HashSet::new();
+        let mut saw_tint = false;
+        for x in 0..area.width {
+            if let Some(cell) = buf.cell((x, y)) {
+                let s = cell.symbol();
+                // The add tint is theme-derived but always green-dominant: a
+                // truecolor RGB whose green channel leads (see highlight::tint).
+                if let Color::Rgb(r, g, b) = cell.bg
+                    && g > r
+                    && g > b
+                {
+                    saw_tint = true;
+                }
+                if s.trim() != "" && s != "\u{FFFD}" {
+                    fg_colours.insert(cell.fg);
+                }
+            }
+        }
+        assert!(
+            saw_tint,
+            "added line should carry the green tint background"
+        );
+        assert!(
+            fg_colours.len() > 2,
+            "expected several syntax foreground colours, saw {fg_colours:?}"
+        );
+    }
+
+    #[test]
+    fn theme_picker_overlay_renders() {
+        let files = vec![ChangedFile::new(
+            PathBuf::from("a.rs"),
+            ChangeKind::Modified,
+        )];
+        let mut app = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('T'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+
+        let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+
+        assert!(
+            text.contains("Select theme"),
+            "picker title missing:\n{text}"
+        );
+        assert!(text.contains("search:"), "search input missing:\n{text}");
+        assert!(text.contains("apply"), "footer hint missing:\n{text}");
     }
 
     #[test]

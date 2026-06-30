@@ -14,6 +14,7 @@ mod config;
 mod event;
 mod git;
 mod glyphs;
+mod highlight;
 mod model;
 mod persist;
 mod reference;
@@ -214,6 +215,19 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
         None
     };
 
+    // Highlighting runs off the UI thread (it can take 100s of ms on a large
+    // diff); workers post results back as `Event::Highlighted`. A dedicated
+    // foreground worker handles the file in view, and a small pool warms the rest
+    // in the background. Wiring the senders also kicks off the first file.
+    let prefetch_threads = std::thread::available_parallelism()
+        .map(|n| n.get().min(2))
+        .unwrap_or(1);
+    app.set_highlight_senders(
+        event::spawn_highlight_worker(tx.clone()),
+        event::spawn_prefetch_pool(tx.clone(), prefetch_threads),
+        prefetch_threads,
+    );
+
     while !app.should_quit {
         if app.dirty {
             tui.draw(|f| ui::render(f, app))?;
@@ -228,6 +242,11 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
             while poll(Duration::ZERO)? {
                 handle_terminal_event(app, read()?);
             }
+        } else {
+            // No input this tick — the user has paused. Warm not-yet-opened
+            // files' highlights in the background so navigating to them shows
+            // colour immediately instead of the brief flat→coloured flash.
+            app.pump_prefetch();
         }
 
         // Drain background events without blocking.
@@ -241,6 +260,13 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
                     }
                 }
                 Event::Refreshed(snapshot) => app.reconcile(snapshot),
+                Event::Highlighted {
+                    path,
+                    theme,
+                    diff_hash,
+                    generation,
+                    highlight,
+                } => app.apply_highlight(&path, theme, diff_hash, generation, highlight),
                 Event::Error(msg) => {
                     app.error = Some(msg);
                     app.dirty = true;

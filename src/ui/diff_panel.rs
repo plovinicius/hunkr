@@ -3,6 +3,8 @@
 //! Only the visible window of rows is materialized into `Line`s each frame, so
 //! cost is O(viewport height) no matter how large the diff is.
 
+use std::ops::Range;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -12,7 +14,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, ReviewedDisplay, RowRef, SideRow, ViewMode};
 use crate::glyphs::Glyphs;
-use crate::model::diff::{FileDiff, LineKind};
+use crate::highlight::{FileHighlight, StyledLine};
+use crate::model::diff::{DiffLine, FileDiff, LineKind};
 use crate::render::{sanitize, viewport};
 
 /// Tab stop width used when expanding tabs for display.
@@ -81,6 +84,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     let dim_reviewed = app.config.reviewed_chunks == ReviewedDisplay::Dim;
+    let highlight = app.highlight.as_deref();
+    let tints = highlight.map(|h| (h.add_bg, h.del_bg));
     let height = inner.height as usize;
     let window = viewport::visible_range(app.scroll, height, app.diff_rows.len());
 
@@ -100,7 +105,6 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
             }
             RowRef::Line(h, l) => {
                 let dl = &fd.chunks[h].lines[l];
-                let content = expand_tabs(fd.slice(&dl.text));
                 let (marker, color) = line_marker(dl.kind);
                 let gutter = format!(
                     "{:>5} {:>5} {marker} ",
@@ -108,10 +112,13 @@ fn render_unified(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                     fmt_no(dl.new_no)
                 );
                 lines.push(body_line(
+                    fd,
+                    dl,
+                    highlight.and_then(|hl| hl.line(h, l)),
                     h == app.current_chunk,
                     dim_reviewed && app.chunk_reviewed(h),
+                    tints,
                     gutter,
-                    content,
                     color,
                     &app.glyphs,
                     inner.width as usize,
@@ -148,6 +155,7 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
     let window = viewport::visible_range(app.scroll, height, app.side_rows.len());
     let divider = Style::default().fg(Color::DarkGray);
     let dim_reviewed = app.config.reviewed_chunks == ReviewedDisplay::Dim;
+    let highlight = app.highlight.as_deref();
 
     let mut lines = Vec::with_capacity(window.len());
     for &row in &app.side_rows[window] {
@@ -168,27 +176,45 @@ fn render_side_by_side(f: &mut Frame, inner: Rect, app: &App, fd: &FileDiff) {
                 let current = chunk == Some(app.current_chunk);
                 let dimmed = dim_reviewed && chunk.is_some_and(|h| app.chunk_reviewed(h));
                 let lead = if current { app.glyphs.chunk_bar } else { ' ' };
-                let (lc, ls) = side_cell(fd, left, left_w, Side::Old, dimmed);
-                let (rc, rs) = side_cell(fd, right, right_w, Side::New, dimmed);
-                if current {
-                    let bg = CURRENT_CHUNK_BODY_BG;
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            lead.to_string(),
-                            Style::default().fg(CURRENT_CHUNK_BAR).bg(bg),
-                        ),
-                        Span::styled(lc, ls.bg(bg)),
-                        Span::styled("│", divider.bg(bg)),
-                        Span::styled(rc, rs.bg(bg)),
-                    ]));
+                let chrome_bg = if current {
+                    Some(CURRENT_CHUNK_BODY_BG)
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::styled(lead.to_string(), divider),
-                        Span::styled(lc, ls),
-                        Span::styled("│", divider),
-                        Span::styled(rc, rs),
-                    ]));
+                    None
+                };
+                let mut spans = Vec::new();
+                let mut lead_style = Style::default().fg(if current {
+                    CURRENT_CHUNK_BAR
+                } else {
+                    Color::DarkGray
+                });
+                if let Some(bg) = chrome_bg {
+                    lead_style = lead_style.bg(bg);
                 }
+                spans.push(Span::styled(lead.to_string(), lead_style));
+                spans.extend(side_cell(
+                    fd,
+                    left,
+                    left_w,
+                    Side::Old,
+                    dimmed,
+                    current,
+                    highlight,
+                ));
+                let mut div_style = divider;
+                if let Some(bg) = chrome_bg {
+                    div_style = div_style.bg(bg);
+                }
+                spans.push(Span::styled("│", div_style));
+                spans.extend(side_cell(
+                    fd,
+                    right,
+                    right_w,
+                    Side::New,
+                    dimmed,
+                    current,
+                    highlight,
+                ));
+                lines.push(Line::from(spans));
             }
         }
     }
@@ -202,17 +228,34 @@ enum Side {
     New,
 }
 
-/// Render one side of a side-by-side row, padded/truncated to `width` columns.
-/// An absent line yields a blank cell.
+/// Render one side of a side-by-side row as styled spans, filling exactly
+/// `width` columns. An absent line yields a blank cell. The line-number gutter
+/// keeps the side's diff colour (red on the old side's deletions, green on the
+/// new side's additions); code content is syntax-highlighted (with a faint
+/// add/del background tint) when `highlight` is present, else flat-coloured.
+#[allow(clippy::too_many_arguments)]
 fn side_cell(
     fd: &FileDiff,
     cell: Option<(usize, usize)>,
     width: usize,
     side: Side,
     dimmed: bool,
-) -> (String, Style) {
+    current: bool,
+    highlight: Option<&FileHighlight>,
+) -> Vec<Span<'static>> {
+    let tints = highlight.map(|h| (h.add_bg, h.del_bg));
+    let wash = if current {
+        Some(CURRENT_CHUNK_BODY_BG)
+    } else {
+        None
+    };
     let Some((h, l)) = cell else {
-        return (" ".repeat(width), Style::default());
+        // Blank cell: still carry the current-chunk wash so the block reads as one.
+        let mut style = Style::default();
+        if let Some(bg) = wash {
+            style = style.bg(bg);
+        }
+        return vec![Span::styled(" ".repeat(width), style)];
     };
     let dl = &fd.chunks[h].lines[l];
     let (no, marker, color) = match side {
@@ -235,10 +278,27 @@ fn side_cell(
             },
         ),
     };
-    let content = expand_tabs(fd.slice(&dl.text));
-    let text = fit(&format!("{:>4} {marker} {content}", fmt_no(no)), width);
-    let color = if dimmed { Color::DarkGray } else { color };
-    (text, Style::default().fg(color))
+    let cell_bg = line_bg(dl.kind, current, dimmed, tints);
+    let gutter = format!("{:>4} {marker} ", fmt_no(no));
+    let gutter_w = gutter.width();
+    let gutter_fg = if dimmed { Color::DarkGray } else { color };
+    let mut gutter_style = Style::default().fg(gutter_fg);
+    if let Some(bg) = cell_bg {
+        gutter_style = gutter_style.bg(bg);
+    }
+
+    let mut spans = vec![Span::styled(gutter, gutter_style)];
+    let max_cols = width.saturating_sub(gutter_w);
+    spans.extend(styled_content(
+        fd,
+        dl,
+        highlight.and_then(|hl| hl.line(h, l)),
+        color,
+        dimmed,
+        cell_bg,
+        max_cols,
+    ));
+    spans
 }
 
 /// Build a styled chunk-header line. The chunk the `n`/`p` cursor is on gets the
@@ -288,38 +348,128 @@ fn header_line<'a>(
 /// accent bar and a subtle full-row background wash, so the whole chunk reads as
 /// one active block. The leading bar column is present (as a blank) on every
 /// row so content stays vertically aligned as the cursor moves between chunks.
-fn body_line<'a>(
+///
+/// When `tints` is set (syntax highlighting on), added/removed rows carry the
+/// theme-derived green/red background and the code shows its syntax colours in
+/// the foreground; `styled` holds the per-token colours (absent → flat `base_fg`).
+#[allow(clippy::too_many_arguments)]
+fn body_line(
+    fd: &FileDiff,
+    dl: &DiffLine,
+    styled: Option<&StyledLine>,
     current: bool,
     dimmed: bool,
+    tints: Option<(Color, Color)>,
     gutter: String,
-    content: String,
-    color: Color,
+    base_fg: Color,
     g: &Glyphs,
     width: usize,
-) -> Line<'a> {
-    let dim = Style::default().fg(Color::DarkGray);
+) -> Line<'static> {
     let lead = if current { g.chunk_bar } else { ' ' };
-    // In "dim" mode a reviewed chunk's lines are greyed out rather than folded.
-    let color = if dimmed { Color::DarkGray } else { color };
-    if current {
-        let bg = CURRENT_CHUNK_BODY_BG;
-        // Pad the content so the wash fills the row out to the right edge.
-        let pad = width.saturating_sub(1 + gutter.width());
-        Line::from(vec![
-            Span::styled(
-                lead.to_string(),
-                Style::default().fg(CURRENT_CHUNK_BAR).bg(bg),
-            ),
-            Span::styled(gutter, dim.bg(bg)),
-            Span::styled(fit(&content, pad), Style::default().fg(color).bg(bg)),
-        ])
+    let chrome_bg = if current {
+        Some(CURRENT_CHUNK_BODY_BG)
     } else {
-        Line::from(vec![
-            Span::styled(lead.to_string(), dim),
-            Span::styled(gutter, dim),
-            Span::styled(content, Style::default().fg(color)),
-        ])
+        None
+    };
+    let content_bg = line_bg(dl.kind, current, dimmed, tints);
+
+    let mut lead_style = Style::default().fg(if current {
+        CURRENT_CHUNK_BAR
+    } else {
+        Color::DarkGray
+    });
+    let mut gutter_style = Style::default().fg(Color::DarkGray);
+    if let Some(bg) = chrome_bg {
+        lead_style = lead_style.bg(bg);
+        gutter_style = gutter_style.bg(bg);
     }
+
+    let gutter_w = gutter.width();
+    let mut spans = vec![
+        Span::styled(lead.to_string(), lead_style),
+        Span::styled(gutter, gutter_style),
+    ];
+    let max_cols = width.saturating_sub(1 + gutter_w);
+    spans.extend(styled_content(
+        fd, dl, styled, base_fg, dimmed, content_bg, max_cols,
+    ));
+    Line::from(spans)
+}
+
+/// The background fill for a body row's *content*. When highlighting is on,
+/// `tints` carries the theme-derived `(add, del)` colours; added/removed rows get
+/// the matching tint. Otherwise only the current chunk's wash applies. A dimmed
+/// (reviewed) row drops the tint so it stays visually quiet.
+fn line_bg(
+    kind: LineKind,
+    current: bool,
+    dimmed: bool,
+    tints: Option<(Color, Color)>,
+) -> Option<Color> {
+    match tints {
+        Some((add, _)) if !dimmed && kind == LineKind::Add => Some(add),
+        Some((_, del)) if !dimmed && kind == LineKind::Del => Some(del),
+        _ if current => Some(CURRENT_CHUNK_BODY_BG),
+        _ => None,
+    }
+}
+
+/// Build the content spans for a diff line: one `Span` per syntax token (or a
+/// single flat span when `styled` is absent/empty), expanding tabs and
+/// sanitizing control characters across a shared display-column counter so tab
+/// stops line up across token boundaries. Truncates to `max_cols`; if `bg` is
+/// set, pads with spaces so the background fills the row's content area.
+fn styled_content(
+    fd: &FileDiff,
+    dl: &DiffLine,
+    styled: Option<&StyledLine>,
+    base_fg: Color,
+    dimmed: bool,
+    bg: Option<Color>,
+    max_cols: usize,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut col = 0usize;
+
+    // Token list: highlighter spans when present, else the whole line as one
+    // flat-coloured token.
+    let tokens: Vec<(Range<usize>, Color, Modifier)> = match styled {
+        Some(sl) if !sl.spans.is_empty() => sl
+            .spans
+            .iter()
+            .map(|(r, st)| (r.clone(), st.fg, st.modifier))
+            .collect(),
+        _ => vec![(dl.text.clone(), base_fg, Modifier::empty())],
+    };
+
+    for (range, fg, modifier) in tokens {
+        let mut out = String::new();
+        let hit_cap = push_expanded(&mut out, &fd.text[range], &mut col, max_cols);
+        if !out.is_empty() {
+            let mut style = Style::default().fg(if dimmed { Color::DarkGray } else { fg });
+            if !dimmed {
+                style = style.add_modifier(modifier);
+            }
+            if let Some(bg) = bg {
+                style = style.bg(bg);
+            }
+            spans.push(Span::styled(out, style));
+        }
+        if hit_cap {
+            break;
+        }
+    }
+
+    // Pad so the tint/wash background reaches the right edge of the content area.
+    if let Some(bg) = bg
+        && col < max_cols
+    {
+        spans.push(Span::styled(
+            " ".repeat(max_cols - col),
+            Style::default().bg(bg),
+        ));
+    }
+    spans
 }
 
 fn line_marker(kind: LineKind) -> (char, Color) {
@@ -356,26 +506,42 @@ fn fit(s: &str, width: usize) -> String {
     out
 }
 
-/// Expand tabs to the next tab stop using display width so columns line up,
-/// and neutralize any other control characters. Diff content is untrusted repo
-/// text; a raw `ESC`/`BEL` could be interpreted by the terminal as an escape
-/// sequence, so every control byte (other than tab, expanded here) is replaced
-/// with the single-width replacement char.
-fn expand_tabs(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut col = 0;
+/// Expand `s` into `out` for display, advancing the shared display column `col`
+/// and stopping before it would exceed `max_cols`. Tabs expand to the next tab
+/// stop (so columns line up across token boundaries via the shared `col`); every
+/// other control character is replaced with the single-width replacement char.
+///
+/// Diff content is untrusted repo text — a raw `ESC`/`BEL` could be interpreted
+/// by the terminal as an escape sequence — so neutralizing control bytes here
+/// closes that off for the highlighted render path too.
+///
+/// Returns `true` if the column budget was reached (the caller should stop
+/// emitting further tokens for this line).
+fn push_expanded(out: &mut String, s: &str, col: &mut usize, max_cols: usize) -> bool {
     for ch in s.chars() {
         if ch == '\t' {
-            let spaces = TAB_WIDTH - (col % TAB_WIDTH);
-            out.extend(std::iter::repeat_n(' ', spaces));
-            col += spaces;
+            let spaces = TAB_WIDTH - (*col % TAB_WIDTH);
+            for _ in 0..spaces {
+                if *col >= max_cols {
+                    return true;
+                }
+                out.push(' ');
+                *col += 1;
+            }
         } else if ch.is_control() {
+            if *col >= max_cols {
+                return true;
+            }
             out.push('\u{FFFD}');
-            col += 1;
+            *col += 1;
         } else {
+            let w = ch.width().unwrap_or(0);
+            if *col + w > max_cols {
+                return true;
+            }
             out.push(ch);
-            col += ch.width().unwrap_or(0);
+            *col += w;
         }
     }
-    out
+    false
 }

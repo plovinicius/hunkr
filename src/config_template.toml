@@ -21,6 +21,19 @@ view = "unified"
 #   "dim"      keep its lines visible but greyed out
 reviewed_chunks = "collapse"
 
+# ── Syntax highlighting ─────────────────────────────────────────────────────
+# Source-code colouring for diff bodies, using the syntax + theme set the `bat`
+# project curates. On by default. Pick a theme at runtime with `T`
+# (open_theme_picker) — live preview as you browse, and your choice is saved here.
+# [theme]
+# syntax    = true                 # set false to disable highlighting entirely
+# theme     = "base16-ocean.dark"  # any bundled bat theme, or a user .tmTheme name
+# max_lines = 5000                  # skip highlighting diffs larger than this
+#
+# Bundled themes include: base16-ocean.dark, Dracula, Nord, gruvbox-dark,
+# Monokai Extended, OneHalfDark, Solarized (dark), TwoDark, Catppuccin Mocha,
+# and more. Drop extra *.tmTheme files in ~/.config/hunkr/themes/ to add your own.
+
 # ── Auto-hide files ─────────────────────────────────────────────────────────
 # Files hidden here are dropped from the review automatically (combined with the
 # interactive `h` hides). Press `H` to reveal the hidden list.

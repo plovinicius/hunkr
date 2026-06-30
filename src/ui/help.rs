@@ -48,6 +48,7 @@ const LEFT: &[Section] = &[
         title: "View",
         rows: &[
             (Action::ToggleView, "unified / side-by-side"),
+            (Action::OpenThemePicker, "choose syntax theme"),
             (Action::NarrowSidebar, "narrow sidebar"),
             (Action::WidenSidebar, "widen sidebar"),
         ],

@@ -18,6 +18,7 @@ use crate::cache::DiffCache;
 use crate::config::{self, Action, Config};
 use crate::git::{self, diff::DiffBase};
 use crate::glyphs::Glyphs;
+use crate::highlight::FileHighlight;
 use crate::model::review::{self, FileHashes, ReviewStatus};
 use crate::model::{
     diff::{Chunk, FileDiff, LineKind},
@@ -30,6 +31,10 @@ use crate::render::viewport;
 
 /// Max parsed diffs kept hydrated in the LRU cache.
 const DIFF_CACHE_CAP: usize = 128;
+
+/// Max computed highlights cached for instant (flicker-free) revisits. Cleared
+/// wholesale when exceeded — a coarse but cheap bound.
+const HIGHLIGHT_CACHE_CAP: usize = 256;
 
 /// Rows the diff scrolls per mouse-wheel notch.
 const MOUSE_SCROLL_LINES: isize = 3;
@@ -72,6 +77,21 @@ pub enum Mode {
     Filter,
     /// Help overlay is open.
     Help,
+    /// Theme picker overlay is open (fuzzy-search + live preview).
+    ThemePicker,
+}
+
+/// State for the theme picker overlay: a fuzzy-search input over the available
+/// theme names with live preview as the cursor moves.
+pub struct ThemePicker {
+    /// Current search query.
+    pub query: String,
+    /// Theme names matching `query`, best match first.
+    pub matches: Vec<String>,
+    /// Index into `matches` of the highlighted row.
+    pub cursor: usize,
+    /// The theme that was active when the picker opened, restored on cancel.
+    pub original: String,
 }
 
 /// A request to open a file in `$EDITOR`, consumed by the run loop (which owns
@@ -149,6 +169,40 @@ pub struct App {
     pub side_chunk_starts: Vec<usize>,
     /// Which file index `diff` belongs to, to avoid redundant reloads.
     pub diff_file: Option<usize>,
+    /// Syntax highlighting for the currently displayed `diff`, parallel to its
+    /// chunks/lines. Recomputed on file change and on theme change (live preview
+    /// in the theme picker). `None` when highlighting is off, the diff is too
+    /// large, or no diff is loaded.
+    pub highlight: Option<Arc<FileHighlight>>,
+    /// The theme name currently used for highlighting. Mirrors `config.theme.theme`
+    /// except while the theme picker is previewing a candidate.
+    pub active_theme: String,
+    /// Open theme picker overlay, if any (`mode == ThemePicker` mirrors this).
+    pub theme_picker: Option<ThemePicker>,
+    /// Whether the terminal supports 24-bit colour (drives RGB vs xterm-256).
+    pub truecolor: bool,
+    /// Sender to the foreground highlight worker (the file in view). `None` in
+    /// tests (and until the run loop wires it up), where highlighting is instead
+    /// computed inline.
+    highlight_tx: Option<crossbeam_channel::Sender<crate::event::HighlightRequest>>,
+    /// Sender to the prefetch pool that warms not-yet-opened files in the
+    /// background. `None` until the run loop wires it up.
+    prefetch_tx: Option<crossbeam_channel::Sender<crate::event::HighlightRequest>>,
+    /// How many prefetch jobs may be in flight at once (the pool's thread count).
+    prefetch_parallelism: usize,
+    /// Paths with a prefetch job currently in flight (so we don't redispatch the
+    /// same file before its result lands).
+    prefetch_inflight: std::collections::HashSet<PathBuf>,
+    /// Paths permanently skipped by prefetch this session (binary / oversized).
+    /// Cleared when the file list changes, in case a file's nature changed.
+    prefetch_skip: std::collections::HashSet<PathBuf>,
+    /// Monotonic tag for highlight requests, so a result for a since-superseded
+    /// file/theme selection is dropped instead of flashing in.
+    highlight_gen: u64,
+    /// Computed highlights keyed by path, tagged with the theme and diff-content
+    /// hash they were built for. Lets a revisited file render coloured instantly
+    /// (no flat→coloured flicker) as long as its diff and theme are unchanged.
+    highlight_cache: HashMap<PathBuf, (String, u64, Arc<FileHighlight>)>,
     /// LRU cache of parsed diffs, keyed by file signature.
     cache: DiffCache,
 
@@ -237,7 +291,10 @@ pub struct App {
 impl App {
     pub fn new(repo_root: PathBuf, config: Config, config_path: PathBuf) -> anyhow::Result<Self> {
         let base = git::diff::detect_base(&repo_root);
-        let files = git::status::changed_files(&repo_root)?;
+        let mut files = git::status::changed_files(&repo_root)?;
+        // Populate +/- counts up front so the tree shows them before any file's
+        // diff is hydrated.
+        git::numstat::fill_line_counts(&repo_root, base, &mut files);
         let git_dir = git::repo::git_dir(&repo_root)?;
         let review = ReviewStore::load(&git_dir);
         // Compute current hashes for the (typically few) reviewed files up front
@@ -257,6 +314,7 @@ impl App {
         app.view = config.view;
         app.config = config;
         app.config_path = config_path;
+        app.active_theme = app.config.theme.theme.clone();
         // Apply the persisted hidden set + config rules before picking the first
         // file, so the selection lands on a *shown* file rather than a hidden one.
         app.recompute_view();
@@ -284,6 +342,17 @@ impl App {
             side_rows: Vec::new(),
             side_chunk_starts: Vec::new(),
             diff_file: None,
+            highlight: None,
+            active_theme: crate::highlight::DEFAULT_THEME.to_string(),
+            theme_picker: None,
+            truecolor: crate::highlight::supports_truecolor(),
+            highlight_tx: None,
+            prefetch_tx: None,
+            prefetch_parallelism: 0,
+            prefetch_inflight: std::collections::HashSet::new(),
+            prefetch_skip: std::collections::HashSet::new(),
+            highlight_gen: 0,
+            highlight_cache: HashMap::new(),
             cache: DiffCache::new(DIFF_CACHE_CAP),
             live: true,
             preloaded: HashMap::new(),
@@ -336,6 +405,7 @@ impl App {
         app.view = config.view;
         app.config = config;
         app.config_path = config_path;
+        app.active_theme = app.config.theme.theme.clone();
         app.recompute_view();
         app.select_first_file();
         app.ensure_diff_loaded();
@@ -768,6 +838,9 @@ impl App {
     fn apply_files(&mut self, files: Vec<ChangedFile>, keep_path: Option<&Path>) {
         self.files = files;
         self.tree = FileTree::build(&self.files);
+        // A file's nature may have changed (e.g. binary↔text); re-evaluate skips
+        // on the next prefetch pass.
+        self.prefetch_skip.clear();
         self.recompute_view();
         self.tree_cursor = keep_path
             .and_then(|p| self.cursor_for_path(p))
@@ -915,16 +988,228 @@ impl App {
         self.scroll = 0;
         self.current_chunk = 0;
         self.error = None;
+        self.recompute_highlight();
     }
 
     fn clear_diff(&mut self) {
         self.diff = None;
+        self.highlight = None;
         self.diff_rows.clear();
         self.chunk_starts.clear();
         self.side_rows.clear();
         self.side_chunk_starts.clear();
         self.chunk_collapsed.clear();
         self.chunk_hashes.clear();
+    }
+
+    /// Give the app handles to the foreground highlight worker and the prefetch
+    /// pool, and kick off the first highlight. Called once by the run loop after
+    /// the workers are spawned; `parallelism` is the prefetch pool's thread count.
+    pub fn set_highlight_senders(
+        &mut self,
+        highlight_tx: crossbeam_channel::Sender<crate::event::HighlightRequest>,
+        prefetch_tx: crossbeam_channel::Sender<crate::event::HighlightRequest>,
+        parallelism: usize,
+    ) {
+        self.highlight_tx = Some(highlight_tx);
+        self.prefetch_tx = Some(prefetch_tx);
+        self.prefetch_parallelism = parallelism.max(1);
+        self.recompute_highlight();
+    }
+
+    /// (Re)compute syntax highlighting for the current diff with the active
+    /// theme. When the background worker is wired, this dispatches the work
+    /// off-thread (clearing the stale highlight so the panel shows a flat diff
+    /// until the result lands); without it (tests) the work runs inline. Sets
+    /// `highlight` to `None` when highlighting is disabled, there's no textual
+    /// diff, or the diff exceeds the configured size guard.
+    pub(crate) fn recompute_highlight(&mut self) {
+        if !self.should_highlight() {
+            self.highlight = None;
+            return;
+        }
+        let Some(diff) = self.diff.clone() else {
+            self.highlight = None;
+            return;
+        };
+        let diff_hash = git::diff::hash_text(&diff.text);
+
+        // Cache hit: render coloured immediately, no async round-trip (and so no
+        // flat→coloured flicker when flipping back to a file).
+        if let Some((theme, hash, hl)) = self.highlight_cache.get(&diff.path)
+            && *theme == self.active_theme
+            && *hash == diff_hash
+        {
+            self.highlight = Some(hl.clone());
+            return;
+        }
+
+        self.highlight_gen = self.highlight_gen.wrapping_add(1);
+        match &self.highlight_tx {
+            Some(tx) => {
+                // Off-thread: drop the old highlight (flat render meanwhile) and
+                // request a fresh one; the result arrives via Event::Highlighted.
+                self.highlight = None;
+                let _ = tx.send(crate::event::HighlightRequest {
+                    path: diff.path.clone(),
+                    diff,
+                    theme: self.active_theme.clone(),
+                    truecolor: self.truecolor,
+                    diff_hash,
+                    generation: self.highlight_gen,
+                });
+            }
+            None => {
+                let hl = crate::highlight::theme(&self.active_theme).map(|theme| {
+                    Arc::new(crate::highlight::highlight_file(
+                        &diff,
+                        theme,
+                        self.truecolor,
+                    ))
+                });
+                if let Some(hl) = &hl {
+                    self.cache_highlight(
+                        diff.path.clone(),
+                        self.active_theme.clone(),
+                        diff_hash,
+                        hl.clone(),
+                    );
+                }
+                self.highlight = hl;
+            }
+        }
+    }
+
+    /// Store a computed highlight for later reuse, bounding the cache so a long
+    /// session over many files/themes can't grow it without limit.
+    fn cache_highlight(&mut self, path: PathBuf, theme: String, hash: u64, hl: Arc<FileHighlight>) {
+        if self.highlight_cache.len() >= HIGHLIGHT_CACHE_CAP
+            && !self.highlight_cache.contains_key(&path)
+        {
+            self.highlight_cache.clear();
+        }
+        self.highlight_cache.insert(path, (theme, hash, hl));
+    }
+
+    /// Whether the current diff should be highlighted at all (feature on, textual,
+    /// within the size guard).
+    fn should_highlight(&self) -> bool {
+        if !self.config.theme.syntax {
+            return false;
+        }
+        let Some(fd) = self.diff.as_ref() else {
+            return false;
+        };
+        if fd.is_binary {
+            return false;
+        }
+        let lines: usize = fd.chunks.iter().map(|c| c.lines.len()).sum();
+        lines <= self.config.theme.max_lines
+    }
+
+    /// Install a highlight result from the worker. It's cached for reuse
+    /// regardless (so a prefetched neighbour is reused on open), but only
+    /// displayed if it still matches the current file and the latest request
+    /// generation (else it's stale — e.g. the user has already moved on).
+    pub fn apply_highlight(
+        &mut self,
+        path: &Path,
+        theme: String,
+        diff_hash: u64,
+        generation: u64,
+        highlight: Arc<FileHighlight>,
+    ) {
+        // Whichever worker produced it, this file is no longer in flight.
+        self.prefetch_inflight.remove(path);
+        self.cache_highlight(path.to_path_buf(), theme, diff_hash, highlight.clone());
+        if generation != self.highlight_gen {
+            return; // superseded (or a prefetch result, gen 0) — cached, not shown
+        }
+        if self.diff.as_ref().map(|d| d.path.as_path()) != Some(path) {
+            return;
+        }
+        self.highlight = Some(highlight);
+        self.dirty = true;
+    }
+
+    /// Top up the prefetch pool so the highlight cache warms in display order.
+    /// Keeps up to `prefetch_parallelism` jobs in flight; called when the UI is
+    /// idle so it always yields to active navigation. Each dispatched file is
+    /// fetched/parsed here (cheap) and highlighted on the pool (the slow part).
+    pub fn pump_prefetch(&mut self) {
+        if self.prefetch_tx.is_none() || !self.config.theme.syntax {
+            return;
+        }
+        while self.prefetch_inflight.len() < self.prefetch_parallelism {
+            let Some(fi) = self.next_prefetch_file() else {
+                break; // everything reachable is warm, in flight, or skipped
+            };
+            let path = self.files[fi].path.clone();
+            let Some(diff) = self.diff_for_index(fi) else {
+                self.prefetch_skip.insert(path);
+                continue;
+            };
+            let lines: usize = diff.chunks.iter().map(|c| c.lines.len()).sum();
+            if diff.is_binary || lines > self.config.theme.max_lines {
+                self.prefetch_skip.insert(path);
+                continue;
+            }
+            let req = crate::event::HighlightRequest {
+                path: path.clone(),
+                diff_hash: git::diff::hash_text(&diff.text),
+                diff,
+                theme: self.active_theme.clone(),
+                truecolor: self.truecolor,
+                generation: 0, // prefetch: cached on arrival, never displayed directly
+            };
+            self.prefetch_inflight.insert(path);
+            if let Some(tx) = &self.prefetch_tx {
+                let _ = tx.send(req);
+            }
+        }
+    }
+
+    /// The next file to prefetch, in the tree's display order: the first one that
+    /// isn't already warm for the active theme, in flight, or skipped.
+    fn next_prefetch_file(&self) -> Option<usize> {
+        for &node_idx in &self.tree.visible {
+            let Some(fi) = self.tree.nodes[node_idx].file else {
+                continue;
+            };
+            let path = &self.files[fi].path;
+            if self.prefetch_inflight.contains(path) || self.prefetch_skip.contains(path) {
+                continue;
+            }
+            let warm = self
+                .highlight_cache
+                .get(path)
+                .is_some_and(|(t, _, _)| *t == self.active_theme);
+            if !warm {
+                return Some(fi);
+            }
+        }
+        None
+    }
+
+    /// Fetch (or reuse from cache/preload) the parsed diff for file `fi` without
+    /// disturbing the current selection. Used by prefetch.
+    fn diff_for_index(&mut self, fi: usize) -> Option<Arc<FileDiff>> {
+        let path = self.files.get(fi)?.path.clone();
+        if !self.live {
+            return self.preloaded.get(&path).cloned();
+        }
+        let sig = crate::cache::file_signature(&self.repo_root, &path);
+        if let Some(sig) = sig
+            && let Some(d) = self.cache.get(&path, sig)
+        {
+            return Some(d);
+        }
+        let fd = git::diff::fetch_file_diff(&self.repo_root, self.base, &self.files[fi]).ok()?;
+        let diff = Arc::new(fd);
+        if let Some(sig) = sig {
+            self.cache.put(path, sig, diff.clone());
+        }
+        Some(diff)
     }
 
     /// Inject an already-parsed diff (rendering tests use this to exercise the
@@ -1043,7 +1328,13 @@ impl App {
             ViewMode::Unified => ViewMode::SideBySide,
             ViewMode::SideBySide => ViewMode::Unified,
         };
+        self.config.view = self.view;
         self.scroll_to_current_chunk();
+        // Persist the choice so it sticks across runs, like the theme does. A
+        // write failure is non-fatal — the toggle still applies for this session.
+        if let Err(e) = self.persist_view() {
+            self.show_toast(format!("view not saved: {e}"));
+        }
         self.dirty = true;
     }
 
@@ -1184,6 +1475,7 @@ impl App {
         match self.mode {
             Mode::Help => self.on_key_help(key),
             Mode::Filter => self.on_key_filter(key),
+            Mode::ThemePicker => self.on_key_theme_picker(key),
             Mode::Normal => self.on_key_normal(key),
         }
     }
@@ -1192,6 +1484,172 @@ impl App {
     fn on_key_help(&mut self, _key: KeyEvent) {
         self.mode = Mode::Normal;
         self.dirty = true;
+    }
+
+    // ── theme picker ───────────────────────────────────────────────────────
+
+    /// Open the theme picker, seeded with every available theme and the cursor
+    /// on the currently-active one.
+    fn open_theme_picker(&mut self) {
+        let matches = crate::highlight::theme_names();
+        let cursor = matches
+            .iter()
+            .position(|n| *n == self.active_theme)
+            .unwrap_or(0);
+        self.theme_picker = Some(ThemePicker {
+            query: String::new(),
+            matches,
+            cursor,
+            original: self.active_theme.clone(),
+        });
+        self.mode = Mode::ThemePicker;
+        self.dirty = true;
+    }
+
+    /// Key handling for the theme picker: type to fuzzy-filter, arrows (or
+    /// Ctrl-n/p) to move with live preview, Enter to apply + persist, Esc to
+    /// cancel and restore the previous theme.
+    fn on_key_theme_picker(&mut self, key: KeyEvent) {
+        let ctrl = key
+            .modifiers
+            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => self.close_theme_picker(true),
+            KeyCode::Enter => self.close_theme_picker(false),
+            KeyCode::Down => self.move_theme_cursor(1),
+            KeyCode::Up => self.move_theme_cursor(-1),
+            KeyCode::Char('n') if ctrl => self.move_theme_cursor(1),
+            KeyCode::Char('p') if ctrl => self.move_theme_cursor(-1),
+            KeyCode::Backspace => {
+                if let Some(p) = self.theme_picker.as_mut() {
+                    p.query.pop();
+                }
+                self.refilter_themes();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                if let Some(p) = self.theme_picker.as_mut() {
+                    p.query.push(c);
+                }
+                self.refilter_themes();
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Re-rank the theme list against the current query and preview the top match.
+    fn refilter_themes(&mut self) {
+        let Some(p) = self.theme_picker.as_mut() else {
+            return;
+        };
+        let all = crate::highlight::theme_names();
+        p.matches = fuzzy_filter(&p.query, all);
+        p.cursor = 0;
+        self.preview_theme_at_cursor();
+    }
+
+    /// Move the picker cursor by `delta`, clamped, then preview that theme.
+    fn move_theme_cursor(&mut self, delta: isize) {
+        if let Some(p) = self.theme_picker.as_mut() {
+            if p.matches.is_empty() {
+                return;
+            }
+            let last = p.matches.len() as isize - 1;
+            p.cursor = (p.cursor as isize + delta).clamp(0, last) as usize;
+        }
+        self.preview_theme_at_cursor();
+    }
+
+    /// Apply the highlighted theme to the live diff as a preview (no persistence).
+    fn preview_theme_at_cursor(&mut self) {
+        let name = self
+            .theme_picker
+            .as_ref()
+            .and_then(|p| p.matches.get(p.cursor).cloned());
+        if let Some(name) = name
+            && name != self.active_theme
+        {
+            self.active_theme = name;
+            self.recompute_highlight();
+        }
+    }
+
+    /// Close the picker. On `cancel`, restore the theme that was active when it
+    /// opened; otherwise commit the highlighted theme and persist it to config.
+    fn close_theme_picker(&mut self, cancel: bool) {
+        let Some(p) = self.theme_picker.take() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        if cancel {
+            if self.active_theme != p.original {
+                self.active_theme = p.original;
+                self.recompute_highlight();
+            }
+        } else {
+            let chosen = p
+                .matches
+                .get(p.cursor)
+                .cloned()
+                .unwrap_or_else(|| self.active_theme.clone());
+            self.active_theme = chosen.clone();
+            self.config.theme.theme = chosen.clone();
+            self.recompute_highlight();
+            match self.persist_theme(&chosen) {
+                Ok(()) => self.show_toast(format!("theme: {chosen}")),
+                Err(e) => self.show_toast(format!("theme set (not saved: {e})")),
+            }
+        }
+        self.mode = Mode::Normal;
+        self.dirty = true;
+    }
+
+    /// Write the chosen theme into the user's config file's `[theme]` table.
+    fn persist_theme(&self, name: &str) -> Result<(), String> {
+        use toml_edit::{Item, Table, value};
+        self.edit_config(|doc| {
+            if !doc.contains_key("theme") {
+                doc["theme"] = Item::Table(Table::new());
+            }
+            doc["theme"]["theme"] = value(name);
+        })
+    }
+
+    /// Write the current view mode to the config's top-level `view` key.
+    fn persist_view(&self) -> Result<(), String> {
+        use toml_edit::value;
+        let view = match self.view {
+            ViewMode::Unified => "unified",
+            ViewMode::SideBySide => "side-by-side",
+        };
+        self.edit_config(|doc| {
+            doc["view"] = value(view);
+        })
+    }
+
+    /// Apply `edit` to the user's config file, preserving its existing formatting
+    /// and comments. Creates the file (from the template) if it's absent.
+    fn edit_config(&self, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<(), String> {
+        use toml_edit::DocumentMut;
+
+        let path = &self.config_path;
+        let text = if path.exists() {
+            std::fs::read_to_string(path).map_err(|e| e.to_string())?
+        } else {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            Config::default_template()
+        };
+        let mut doc = text.parse::<DocumentMut>().map_err(|e| {
+            e.to_string()
+                .lines()
+                .next()
+                .unwrap_or("invalid config")
+                .to_string()
+        })?;
+        edit(&mut doc);
+        std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())
     }
 
     /// Editing the filter query.
@@ -1316,6 +1774,7 @@ impl App {
                 self.mode = Mode::Filter;
                 self.dirty = true;
             }
+            OpenThemePicker => self.open_theme_picker(),
             Help => {
                 self.mode = Mode::Help;
                 self.dirty = true;
@@ -1418,6 +1877,56 @@ fn build_side_rows(fd: &FileDiff, collapsed: &[bool]) -> (Vec<SideRow>, Vec<usiz
     (rows, starts)
 }
 
+/// Rank `candidates` by a case-insensitive fuzzy match against `query`. An empty
+/// query keeps the original (alphabetical) order; non-matching names are dropped.
+fn fuzzy_filter(query: &str, candidates: Vec<String>) -> Vec<String> {
+    if query.is_empty() {
+        return candidates;
+    }
+    let q = query.to_lowercase();
+    let mut scored: Vec<(i64, String)> = candidates
+        .into_iter()
+        .filter_map(|c| fuzzy_score(&q, &c).map(|s| (s, c)))
+        .collect();
+    // Higher score first; ties broken alphabetically for a stable order.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+/// Subsequence fuzzy score: each char of `q` (already lowercased) must occur in
+/// order within `candidate`. Contiguous runs score higher and earlier first
+/// matches are preferred. `None` when `q` is not a subsequence of `candidate`.
+fn fuzzy_score(q: &str, candidate: &str) -> Option<i64> {
+    let mut chars = candidate
+        .to_lowercase()
+        .chars()
+        .collect::<Vec<_>>()
+        .into_iter();
+    let mut score: i64 = 0;
+    let mut last_matched = false;
+    let mut idx: i64 = 0;
+    let mut first: Option<i64> = None;
+    for qc in q.chars() {
+        loop {
+            match chars.next() {
+                Some(cc) => {
+                    idx += 1;
+                    if cc == qc {
+                        first.get_or_insert(idx);
+                        score += if last_matched { 10 } else { 1 };
+                        last_matched = true;
+                        break;
+                    }
+                    last_matched = false;
+                }
+                None => return None,
+            }
+        }
+    }
+    // Prefer names where the match starts earlier.
+    Some(score - first.unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1429,7 +1938,12 @@ mod tests {
     }
 
     fn app(files: Vec<ChangedFile>) -> App {
-        App::with_files(PathBuf::from("/repo"), DiffBase::Head, files)
+        let mut a = App::with_files(PathBuf::from("/repo"), DiffBase::Head, files);
+        // Point config writes (view/theme persistence) at a throwaway temp path so
+        // tests never touch the real user config.
+        a.config_path =
+            std::env::temp_dir().join(format!("hunkr-test-{}.toml", std::process::id()));
+        a
     }
 
     #[test]
@@ -2059,5 +2573,260 @@ mod tests {
         a.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 70));
         a.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 30));
         assert_eq!(a.tree_width, 71, "drag after release must not resize");
+    }
+
+    #[test]
+    fn fuzzy_filter_ranks_subsequence_matches() {
+        let themes = vec![
+            "Dracula".to_string(),
+            "base16-ocean.dark".to_string(),
+            "Nord".to_string(),
+            "gruvbox-dark".to_string(),
+        ];
+        // Empty query keeps everything in order.
+        assert_eq!(fuzzy_filter("", themes.clone()).len(), 4);
+        // "drac" matches only Dracula.
+        let m = fuzzy_filter("drac", themes.clone());
+        assert_eq!(m, vec!["Dracula".to_string()]);
+        // "dark" matches both dark themes; non-matches are dropped.
+        let m = fuzzy_filter("dark", themes.clone());
+        assert_eq!(m.len(), 2);
+        assert!(m.iter().all(|t| t.contains("dark")));
+        // A query that matches nothing yields an empty list.
+        assert!(fuzzy_filter("zzzz", themes).is_empty());
+    }
+
+    #[test]
+    fn theme_picker_previews_and_cancel_restores() {
+        let mut a = app(vec![file("foo.rs")]);
+        a.active_theme = crate::highlight::DEFAULT_THEME.to_string();
+        let original = a.active_theme.clone();
+
+        a.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert_eq!(a.mode, Mode::ThemePicker);
+        assert!(a.theme_picker.is_some());
+
+        // Type to filter to Dracula and confirm it previews live.
+        for c in "drac".chars() {
+            a.on_key(key(c));
+        }
+        assert_eq!(a.active_theme, "Dracula", "cursor theme previews live");
+
+        // Esc cancels and restores the theme that was active on open.
+        a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.mode, Mode::Normal);
+        assert!(a.theme_picker.is_none());
+        assert_eq!(a.active_theme, original, "cancel restores the prior theme");
+    }
+
+    #[test]
+    fn async_highlight_dispatches_and_applies_matching_result() {
+        use crate::git::diff::parse_unified;
+        use crate::highlight::FileHighlight;
+        use ratatui::style::Color;
+
+        let mut a = app(vec![file("foo.rs")]);
+        let raw = "@@ -1,1 +1,1 @@\n-a\n+let x = 1;\n";
+        a.set_diff_for_test(parse_unified(Arc::from(raw), PathBuf::from("foo.rs")));
+
+        // Wire worker channels and select a theme not yet cached, so the next
+        // recompute dispatches a request rather than serving a cache hit.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (pf_tx, _pf_rx) = crossbeam_channel::unbounded();
+        a.set_highlight_senders(tx, pf_tx, 2);
+        a.active_theme = "Nord".to_string();
+        a.recompute_highlight();
+
+        // The request was dispatched and the highlight cleared so the panel
+        // renders flat until the worker replies.
+        assert!(a.highlight.is_none(), "highlight cleared while pending");
+        let req = rx.try_recv().expect("a highlight request was sent");
+        assert_eq!(req.path, PathBuf::from("foo.rs"));
+        assert_eq!(req.theme, "Nord");
+
+        let dummy = Arc::new(FileHighlight {
+            chunks: Vec::new(),
+            add_bg: Color::Reset,
+            del_bg: Color::Reset,
+        });
+
+        // A stale generation is ignored (but still cached for later reuse).
+        a.apply_highlight(
+            &req.path,
+            req.theme.clone(),
+            req.diff_hash,
+            req.generation.wrapping_sub(1),
+            dummy.clone(),
+        );
+        assert!(
+            a.highlight.is_none(),
+            "stale-generation result must be dropped"
+        );
+
+        // A result for a different file is ignored.
+        a.apply_highlight(
+            Path::new("other.rs"),
+            req.theme.clone(),
+            req.diff_hash,
+            req.generation,
+            dummy.clone(),
+        );
+        assert!(a.highlight.is_none(), "wrong-path result must be dropped");
+
+        // The matching result is installed.
+        a.apply_highlight(
+            &req.path,
+            req.theme.clone(),
+            req.diff_hash,
+            req.generation,
+            dummy,
+        );
+        assert!(a.highlight.is_some(), "matching result must be applied");
+
+        // Revisiting the same file+theme now hits the cache: coloured instantly,
+        // no new request dispatched.
+        a.recompute_highlight();
+        assert!(a.highlight.is_some(), "cache hit should keep it coloured");
+        assert!(
+            rx.try_recv().is_err(),
+            "a cache hit must not dispatch another request"
+        );
+    }
+
+    #[test]
+    fn prefetch_warms_all_files_in_parallel() {
+        use crate::highlight::FileHighlight;
+        use ratatui::style::Color;
+        use std::collections::HashSet;
+        // Pager mode preloads every file's diff, so prefetch needs no git. With
+        // three files and the first already warm (highlighted on load), prefetch
+        // should warm the other two — up to `parallelism` (2) in flight at once.
+        let raw = concat!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,1 @@\n-a\n+let x = 1;\n",
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1,1 +1,1 @@\n-b\n+let y = 2;\n",
+            "diff --git a/c.rs b/c.rs\n--- a/c.rs\n+++ b/c.rs\n@@ -1,1 +1,1 @@\n-c\n+let z = 3;\n",
+        );
+        let parsed = crate::git::diff::split_unified(raw);
+        let files: Vec<_> = parsed.iter().map(|(f, _)| f.clone()).collect();
+        let diffs: HashMap<_, _> = parsed
+            .iter()
+            .map(|(f, d)| (f.path.clone(), d.clone()))
+            .collect();
+        let mut a = App::from_diff(
+            PathBuf::from("/repo"),
+            files,
+            diffs,
+            Config::default(),
+            PathBuf::from("/x"),
+        );
+
+        let (fg_tx, _fg_rx) = crossbeam_channel::unbounded();
+        let (pf_tx, pf_rx) = crossbeam_channel::unbounded();
+        a.set_highlight_senders(fg_tx, pf_tx, 2);
+
+        let dummy = || {
+            Arc::new(FileHighlight {
+                chunks: Vec::new(),
+                add_bg: Color::Reset,
+                del_bg: Color::Reset,
+            })
+        };
+
+        // Pump fills the pool up to parallelism (2) — the two not-yet-warm files.
+        a.pump_prefetch();
+        let r1 = pf_rx.try_recv().expect("first prefetch dispatched");
+        let r2 = pf_rx.try_recv().expect("second prefetch dispatched");
+        assert!(
+            pf_rx.try_recv().is_err(),
+            "only `parallelism` jobs in flight"
+        );
+        let dispatched: HashSet<_> = [r1.path.clone(), r2.path.clone()].into_iter().collect();
+        assert_eq!(
+            dispatched,
+            HashSet::from([PathBuf::from("b.rs"), PathBuf::from("c.rs")]),
+        );
+        assert_eq!(
+            r1.generation, 0,
+            "prefetch must not claim a display generation"
+        );
+
+        // One result lands → a slot frees → the next pump has nothing new left
+        // (the third file is the one still in flight), and once both are cached
+        // prefetch is idle.
+        a.apply_highlight(&r1.path, r1.theme, r1.diff_hash, 0, dummy());
+        a.pump_prefetch();
+        assert!(
+            pf_rx.try_recv().is_err(),
+            "nothing new while the last is in flight"
+        );
+        a.apply_highlight(&r2.path, r2.theme, r2.diff_hash, 0, dummy());
+        a.pump_prefetch();
+        assert!(
+            pf_rx.try_recv().is_err(),
+            "all files warm: prefetch is idle"
+        );
+    }
+
+    #[test]
+    fn toggling_view_persists_to_config() {
+        let dir = std::env::temp_dir().join(format!("hunkr-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+
+        let mut a = app(vec![file("foo.rs")]);
+        a.config_path = cfg.clone();
+        assert_eq!(a.view, ViewMode::Unified);
+
+        // Toggle to side-by-side via the bound key.
+        a.on_key(key('s'));
+        assert_eq!(a.view, ViewMode::SideBySide);
+
+        // The choice is written and reloads as side-by-side.
+        let (reloaded, warns) = Config::load(&cfg);
+        assert!(
+            warns.is_empty(),
+            "persisted config must reload cleanly: {warns:?}"
+        );
+        assert_eq!(reloaded.view, ViewMode::SideBySide);
+
+        // Toggling back persists the new value too.
+        a.on_key(key('s'));
+        let (reloaded, _) = Config::load(&cfg);
+        assert_eq!(reloaded.view, ViewMode::Unified);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_picker_commit_applies_and_persists() {
+        let dir = std::env::temp_dir().join(format!("hunkr-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+
+        let mut a = app(vec![file("foo.rs")]);
+        a.config_path = cfg.clone();
+
+        a.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        for c in "nord".chars() {
+            a.on_key(key(c));
+        }
+        // Enter commits the highlighted theme.
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.mode, Mode::Normal);
+        assert_eq!(a.active_theme, "Nord");
+        assert_eq!(a.config.theme.theme, "Nord");
+
+        // It was written to the config file's [theme] table.
+        let written = std::fs::read_to_string(&cfg).unwrap();
+        let (reloaded, warns) = Config::load(&cfg);
+        assert!(
+            warns.is_empty(),
+            "persisted config must reload cleanly: {warns:?}"
+        );
+        assert_eq!(reloaded.theme.theme, "Nord", "config on disk:\n{written}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
