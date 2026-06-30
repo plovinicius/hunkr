@@ -154,7 +154,11 @@ fn redirect_stdin_to_tty() {
             Err(_) => return,
         }
     };
-    if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+    if let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
         // dup2 onto fd 0; `f` then drops, but fd 0 keeps the duplicated descriptor.
         unsafe {
             libc::dup2(f.as_raw_fd(), libc::STDIN_FILENO);
