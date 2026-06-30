@@ -152,6 +152,15 @@ pub struct App {
     /// LRU cache of parsed diffs, keyed by file signature.
     cache: DiffCache,
 
+    /// True for the normal live-repo session (git worker + filesystem watch +
+    /// persisted reviewed state). False in **pager mode**: the diff was piped in
+    /// on stdin and the app is a read-only viewer — no git calls, no hot reload,
+    /// no persistence, no editor.
+    pub live: bool,
+    /// Pre-parsed diffs keyed by path, populated only in pager mode. When set,
+    /// [`Self::load_diff`] serves from here instead of shelling out to git.
+    preloaded: HashMap<PathBuf, Arc<FileDiff>>,
+
     pub scroll: usize,
     pub current_chunk: usize,
     /// Per-chunk fold state for the hydrated diff (UI-only, not persisted).
@@ -276,6 +285,8 @@ impl App {
             side_chunk_starts: Vec::new(),
             diff_file: None,
             cache: DiffCache::new(DIFF_CACHE_CAP),
+            live: true,
+            preloaded: HashMap::new(),
             scroll: 0,
             current_chunk: 0,
             chunk_collapsed: Vec::new(),
@@ -305,6 +316,30 @@ impl App {
             config_error: None,
             toast: None,
         }
+    }
+
+    /// Construct a read-only **pager-mode** app from an already-parsed diff
+    /// (e.g. piped in from `git diff`/`git show`). The file list and every
+    /// file's diff are supplied up front; the app never calls git, never
+    /// watches the filesystem, and never persists reviewed state. `repo_root` is
+    /// best-effort (the cwd) and unused on this path.
+    pub fn from_diff(
+        repo_root: PathBuf,
+        files: Vec<ChangedFile>,
+        diffs: HashMap<PathBuf, Arc<FileDiff>>,
+        config: Config,
+        config_path: PathBuf,
+    ) -> Self {
+        let mut app = Self::with_files(repo_root, DiffBase::Head, files);
+        app.live = false;
+        app.preloaded = diffs;
+        app.view = config.view;
+        app.config = config;
+        app.config_path = config_path;
+        app.recompute_view();
+        app.select_first_file();
+        app.ensure_diff_loaded();
+        app
     }
 
     // ── reviewed state ─────────────────────────────────────────────────────
@@ -803,6 +838,20 @@ impl App {
             return;
         }
         let path = self.files[fi].path.clone();
+
+        // Pager mode: the diff was parsed up front from stdin. Serve it directly
+        // (no cache, no git). A missing entry just clears the panel.
+        if !self.live {
+            match self.preloaded.get(&path).cloned() {
+                Some(diff) => self.adopt_diff(fi, diff),
+                None => {
+                    self.clear_diff();
+                    self.diff_file = Some(fi);
+                }
+            }
+            return;
+        }
+
         let sig = crate::cache::file_signature(&self.repo_root, &path);
 
         if use_cache
@@ -1200,6 +1249,25 @@ impl App {
     /// focused, and scrolls the diff otherwise).
     fn dispatch(&mut self, action: Action) {
         use Action::*;
+
+        // Pager mode is a read-only viewer: actions that mutate reviewed/hidden
+        // state, open the editor, or edit config have no meaning for a static
+        // piped diff. Swallow them with a brief hint instead of acting.
+        if !self.live
+            && matches!(
+                action,
+                ToggleReviewed
+                    | ToggleChunkReviewed
+                    | ToggleHidden
+                    | ToggleHiddenView
+                    | OpenEditor
+                    | EditConfig
+            )
+        {
+            self.show_toast("read-only (pager mode)".into());
+            return;
+        }
+
         match action {
             ScrollDown => match self.focus {
                 Focus::Tree => self.cursor_down(),
@@ -1389,6 +1457,52 @@ mod tests {
 
         let cur = a.current_file_index().unwrap();
         assert_eq!(a.files[cur].path, PathBuf::from("a.rs"));
+    }
+
+    #[test]
+    fn pager_mode_serves_preloaded_diffs_without_git() {
+        // Two files piped in; App::from_diff must render them with no git access
+        // (the /repo path doesn't exist), and switching files hydrates from the
+        // preloaded map.
+        let raw = concat!(
+            "diff --git a/one.rs b/one.rs\n",
+            "--- a/one.rs\n",
+            "+++ b/one.rs\n",
+            "@@ -1,1 +1,1 @@\n",
+            "-a\n",
+            "+b\n",
+            "diff --git a/two.rs b/two.rs\n",
+            "--- a/two.rs\n",
+            "+++ b/two.rs\n",
+            "@@ -1,1 +1,2 @@\n",
+            " keep\n",
+            "+added\n",
+        );
+        let parsed = crate::git::diff::split_unified(raw);
+        let files: Vec<_> = parsed.iter().map(|(f, _)| f.clone()).collect();
+        let diffs: HashMap<_, _> = parsed
+            .iter()
+            .map(|(f, d)| (f.path.clone(), d.clone()))
+            .collect();
+
+        let mut a = App::from_diff(
+            PathBuf::from("/repo"),
+            files,
+            diffs,
+            Config::default(),
+            PathBuf::from("/x"),
+        );
+        assert!(!a.live);
+        // First file is hydrated on construction.
+        assert_eq!(a.diff.as_ref().unwrap().path, PathBuf::from("one.rs"));
+
+        // Move to the second file → its preloaded diff is served.
+        a.dispatch(Action::NextFile);
+        assert_eq!(a.diff.as_ref().unwrap().path, PathBuf::from("two.rs"));
+
+        // A mutating action is inert in pager mode (no panic, no review record).
+        a.dispatch(Action::ToggleChunkReviewed);
+        assert!(a.review.reviewed_paths().is_empty());
     }
 
     fn key(c: char) -> KeyEvent {

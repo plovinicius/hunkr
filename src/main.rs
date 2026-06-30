@@ -22,6 +22,8 @@ mod terminal;
 mod ui;
 mod watch;
 
+use std::collections::HashMap;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::Duration;
@@ -45,21 +47,31 @@ const PLUS_LINE_EDITORS: &[&str] = &["vi", "vim", "nvim", "gvim", "mvim", "nano"
 
 fn main() -> Result<()> {
     let args = cli::Args::parse();
-    let start = match args.path {
-        Some(p) => p,
-        None => std::env::current_dir()?,
-    };
-    let repo_root = git::repo::discover(&start)?;
 
     // Resolve the config path (CLI override → XDG/HOME default → cwd fallback),
-    // load it, and surface any warnings once the app is built.
+    // load it, and surface any warnings once the app is built. Shared by both modes.
     let config_path = args
         .config
         .or_else(Config::default_path)
         .unwrap_or_else(|| PathBuf::from(".hunkr.toml"));
     let (config, warnings) = Config::load(&config_path);
 
-    let mut app = App::new(repo_root, config, config_path)?;
+    // Pager mode: a diff was piped in (stdin is not a TTY). Read and view it as a
+    // read-only viewer rather than scanning a working tree. Live mode otherwise.
+    let mut app = if !std::io::stdin().is_terminal() {
+        match build_pager_app(config, config_path)? {
+            Some(app) => app,
+            None => return Ok(()), // empty input / non-TTY stdout already reported
+        }
+    } else {
+        let start = match args.path {
+            Some(p) => p,
+            None => std::env::current_dir()?,
+        };
+        let repo_root = git::repo::discover(&start)?;
+        App::new(repo_root, config, config_path)?
+    };
+
     app.glyphs = if args.ascii {
         glyphs::Glyphs::ascii()
     } else {
@@ -76,15 +88,127 @@ fn main() -> Result<()> {
     result
 }
 
+/// Read a piped diff from stdin and build a read-only pager-mode [`App`]. Returns
+/// `Ok(None)` (after reporting to stderr) when stdout isn't a terminal or the
+/// input carries no reviewable file diff — the caller then exits cleanly.
+fn build_pager_app(config: Config, config_path: PathBuf) -> Result<Option<App>> {
+    // The TUI draws to stdout; if that's redirected (e.g. `git diff | hunkr > f`)
+    // there's nothing to drive, so bail rather than spray escape codes into a file.
+    if !std::io::stdout().is_terminal() {
+        eprintln!("hunkr: pager mode needs a terminal on stdout (don't redirect output)");
+        std::process::exit(2);
+    }
+
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+    // Tolerate non-UTF-8 like the live path, and strip the ANSI colour git emits
+    // to a pager by default so the parser sees raw `+`/`-`/` ` markers.
+    let text = strip_ansi(&String::from_utf8_lossy(&buf));
+
+    // The piped diff is fully read; now repoint stdin at the controlling terminal
+    // so crossterm can read keyboard input (see `redirect_stdin_to_tty`).
+    redirect_stdin_to_tty();
+
+    let parsed = git::diff::split_unified(&text);
+    if parsed.is_empty() {
+        eprintln!("hunkr: no diff on stdin (expected `git diff`/`git show` output)");
+        return Ok(None);
+    }
+
+    let files: Vec<_> = parsed.iter().map(|(f, _)| f.clone()).collect();
+    let diffs: HashMap<_, _> = parsed.into_iter().map(|(f, d)| (f.path, d)).collect();
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Ok(Some(App::from_diff(
+        repo_root,
+        files,
+        diffs,
+        config,
+        config_path,
+    )))
+}
+
+/// Point stdin at the controlling terminal so crossterm can read keys in pager
+/// mode (where the real stdin is the diff pipe, already drained by now).
+///
+/// crossterm's input reader opens whatever `tty_fd()` resolves to: stdin if it's
+/// a TTY, else `/dev/tty`. On macOS, kqueue (via mio) **cannot register the
+/// `/dev/tty` magic device** — it returns `EINVAL` — so the `/dev/tty` path fails
+/// and input is dead. We sidestep that by resolving the *real* terminal device
+/// (via `ttyname` on stdout, which is the terminal in pager mode) and `dup2`-ing
+/// it onto fd 0, so crossterm sees a registrable TTY on stdin. Best-effort: any
+/// failure leaves stdin as-is (Linux's epoll handles `/dev/tty` fine regardless).
+#[cfg(unix)]
+fn redirect_stdin_to_tty() {
+    use std::ffi::CStr;
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: ttyname returns a pointer to a static/thread-local buffer valid
+    // until the next ttyname call; we copy out of it immediately.
+    let path = unsafe {
+        let p = libc::ttyname(libc::STDOUT_FILENO);
+        if p.is_null() {
+            return;
+        }
+        match CStr::from_ptr(p).to_str() {
+            Ok(s) => s.to_owned(),
+            Err(_) => return,
+        }
+    };
+    if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        // dup2 onto fd 0; `f` then drops, but fd 0 keeps the duplicated descriptor.
+        unsafe {
+            libc::dup2(f.as_raw_fd(), libc::STDIN_FILENO);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn redirect_stdin_to_tty() {}
+
+/// Strip ANSI CSI escape sequences (`ESC [ … <0x40–0x7E>`, e.g. SGR colour) from
+/// `input`. Only ASCII escape bytes are dropped, so UTF-8 content is preserved.
+fn strip_ansi(input: &str) -> String {
+    let bytes = input.as_bytes();
+    if !bytes.contains(&0x1b) {
+        return input.to_string();
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            if bytes.get(i + 1) == Some(&b'[') {
+                i += 2;
+                // Consume parameter/intermediate bytes up to the final byte.
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                    i += 1;
+                }
+                i += 1; // consume the final byte (if any)
+            } else {
+                i += 1; // bare ESC or non-CSI escape introducer
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
     let (tx, rx) = unbounded::<Event>();
 
     // Off-thread git worker + filesystem watcher for hot reload. If watching
-    // can't start, the app still works — it just won't auto-refresh.
-    let git_req = event::spawn_git_worker(app.repo_root.clone(), app.base, tx.clone());
-    if let Err(e) = watch::spawn(app.repo_root.clone(), tx.clone()) {
-        app.error = Some(format!("watch disabled: {e}"));
-    }
+    // can't start, the app still works — it just won't auto-refresh. Pager mode
+    // is a static viewer, so neither is spawned (and no events ever arrive).
+    let git_req = if app.live {
+        let req = event::spawn_git_worker(app.repo_root.clone(), app.base, tx.clone());
+        if let Err(e) = watch::spawn(app.repo_root.clone(), tx.clone()) {
+            app.error = Some(format!("watch disabled: {e}"));
+        }
+        Some(req)
+    } else {
+        None
+    };
 
     while !app.should_quit {
         if app.dirty {
@@ -108,7 +232,9 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
                 Event::Fs => {
                     // A change landed; recompute off-thread, re-hashing the
                     // files currently marked reviewed so we can flag changes.
-                    let _ = git_req.send(app.reviewed_paths());
+                    if let Some(req) = &git_req {
+                        let _ = req.send(app.reviewed_paths());
+                    }
                 }
                 Event::Refreshed(snapshot) => app.reconcile(snapshot),
                 Event::Error(msg) => {
@@ -118,15 +244,19 @@ fn run(tui: &mut terminal::Tui, app: &mut App) -> Result<()> {
             }
         }
 
-        // Fulfil an editor request (suspends the TUI for the editor session).
-        if let Some(req) = app.take_editor_request() {
-            open_editor(tui, app, req)?;
-        }
+        // Editor + config-edit only apply in live mode (pager mode is read-only
+        // and never sets these requests).
+        if app.live {
+            // Fulfil an editor request (suspends the TUI for the editor session).
+            if let Some(req) = app.take_editor_request() {
+                open_editor(tui, app, req)?;
+            }
 
-        // Open the config in $EDITOR (creating a template first if needed), then
-        // hot-reload it on return.
-        if app.take_config_edit_request() {
-            open_config(tui, app)?;
+            // Open the config in $EDITOR (creating a template first if needed),
+            // then hot-reload it on return.
+            if app.take_config_edit_request() {
+                open_config(tui, app)?;
+            }
         }
 
         // Auto-dismiss a transient toast once its lifetime elapses. The poll
