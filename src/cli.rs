@@ -1,4 +1,9 @@
 //! Command-line arguments.
+//!
+//! No flag selects "pager mode": hunkr enters it automatically when stdin is not
+//! a TTY (a diff is piped in, e.g. `git diff | hunkr`, or hunkr is set as
+//! `pager.diff`/`pager.show`). With a TTY on stdin it runs the normal live-repo
+//! review. See `build_pager_app` in `main.rs`.
 
 use std::path::PathBuf;
 

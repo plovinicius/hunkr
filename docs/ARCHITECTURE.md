@@ -37,7 +37,7 @@ designs not yet implemented; see [`ROADMAP.md`](./ROADMAP.md) for status.
 ## Module map (`src/`)
 
 ```
-main.rs          entry: CLI parse → repo discover → config load → App::new → terminal guard → run loop
+main.rs          entry: CLI parse → config load → live (repo discover → App::new) or pager (stdin → App::from_diff) → terminal guard → run loop
 cli.rs           clap args (optional repo path, --ascii, --config)
 config.rs        user config (TOML): Config, Action enum, KeyMap, HideRules, chord parser
 config_template.toml  static prose for the template (the [keys] block is generated)
@@ -104,6 +104,14 @@ a rebuild of this list. The diff panel slices a window out of it.
 - **Parser:** a line-by-line state machine; preamble before the first `@@` is skipped,
   chunk bodies retained, line numbers tracked, binary diffs flagged. Cost is O(diff size),
   bounded by *what changed* — a huge file with a small edit parses instantly.
+- **Pager mode (read-only):** when stdin isn't a TTY, `main.rs` reads the piped diff,
+  strips ANSI, and `git/diff.rs::split_unified` splits the multi-file stream on `diff --git`
+  boundaries (deriving path + `ChangeKind` from the header lines, skipping merge/combined
+  `diff --cc` segments), reusing `parse_unified` per file. The app is built via
+  `App::from_diff` with `live = false` and a pre-parsed `preloaded` map; `load_diff` serves
+  from that map, and no git worker, watcher, persistence, or editor is engaged. The crossterm
+  event source reads keys from `/dev/tty`, so interactive input still works while stdin is the
+  diff pipe.
 
 ---
 

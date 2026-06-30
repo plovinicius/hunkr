@@ -55,6 +55,32 @@ avoided so columns stay aligned.
 Requires the system `git` CLI. Diff scope is everything that differs from `HEAD`
 (staged + unstaged + untracked), or the empty tree when the repo has no commits yet.
 
+## Pager mode
+
+Pipe any diff into hunkr and it opens as a **read-only viewer** — handy for reviewing a
+branch comparison, a commit, or a `.patch` that isn't your working tree:
+
+```sh
+git diff main..feature | hunkr     # review a branch comparison
+git show <sha>         | hunkr     # review a single commit
+git log -p             | hunkr     # review a range of commits
+```
+
+You can also wire it in as git's diff pager so `git diff`/`git show` open in hunkr directly:
+
+```sh
+git config --global pager.diff hunkr
+git config --global pager.show hunkr
+```
+
+hunkr auto-detects this: whenever stdin isn't a terminal it parses the piped diff instead of
+scanning a working tree. In pager mode, navigation, fold/expand, unified/side-by-side (`s`),
+copy-AI-reference (`y`), and help (`?`) all work; hot-reload, reviewed-state, hide, and
+editor-open are disabled (they have no meaning for a static diff) — the status bar shows
+`pager (read-only)`. ANSI colour from git is stripped automatically, and merge/combined
+(`diff --cc`) sections are skipped. Don't redirect output (`git diff | hunkr > file`) — the
+viewer needs a terminal on stdout.
+
 ## Keys
 
 | Key       | Action                                   |

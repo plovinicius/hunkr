@@ -16,6 +16,7 @@ anyhow = "1"
 arboard = "3.6.1"
 clap = { version = "4", features = ["derive"] }
 crossbeam-channel = "0.5"
+libc = "0.2"
 notify = "8.2.0"
 ratatui = "0.29"
 regex = "1"

@@ -87,6 +87,21 @@ const RIGHT: &[Section] = &[
 /// Gap (in columns) between the two columns.
 const GAP: u16 = 4;
 
+/// Actions that do nothing in pager (read-only) mode, so the help overlay omits
+/// them there. Mirrors the guard in `App::dispatch`.
+fn pager_inert(action: Action) -> bool {
+    use Action::*;
+    matches!(
+        action,
+        ToggleChunkReviewed
+            | ToggleReviewed
+            | ToggleHidden
+            | ToggleHiddenView
+            | OpenEditor
+            | EditConfig
+    )
+}
+
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let keymap = &app.config.keys;
     let chords = |action: Action| {
@@ -98,12 +113,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         }
     };
 
+    // Pager mode hides inert actions; live mode shows everything.
+    let live = app.live;
+    let shown = move |a: Action| live || !pager_inert(a);
+
     // Each column aligns its descriptions to its *own* widest key, so a long
     // chord in one column doesn't leave the other sparsely spaced.
     let key_w = |sections: &[Section]| {
         sections
             .iter()
             .flat_map(|s| s.rows)
+            .filter(|(a, _)| shown(*a))
             .map(|(a, _)| chords(*a).chars().count())
             .max()
             .unwrap_or(0)
@@ -111,10 +131,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let left_key_w = key_w(LEFT);
     let right_key_w = key_w(RIGHT);
 
-    let left = column_lines(LEFT, left_key_w, &chords);
-    let right = column_lines(RIGHT, right_key_w, &chords);
-    let left_w = column_width(LEFT, left_key_w) as u16;
-    let right_w = column_width(RIGHT, right_key_w) as u16;
+    let left = column_lines(LEFT, left_key_w, &chords, &shown);
+    let right = column_lines(RIGHT, right_key_w, &chords, &shown);
+    let left_w = column_width(LEFT, left_key_w, &shown) as u16;
+    let right_w = column_width(RIGHT, right_key_w, &shown) as u16;
     let rows = left.len().max(right.len()) as u16;
 
     // Top blank + the tallest column + blank + footer, inside the two borders.
@@ -180,19 +200,26 @@ fn column_lines<'a>(
     sections: &[Section],
     key_w: usize,
     chords: &dyn Fn(Action) -> String,
+    shown: &dyn Fn(Action) -> bool,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
-    for (i, section) in sections.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for section in sections {
+        let rows: Vec<_> = section.rows.iter().filter(|(a, _)| shown(*a)).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if !first {
             lines.push(Line::raw(""));
         }
+        first = false;
         lines.push(Line::styled(
             section.title,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
-        for (action, desc) in section.rows {
+        for (action, desc) in rows {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
@@ -208,11 +235,15 @@ fn column_lines<'a>(
 
 /// The display width a column needs: the widest of its titles and its
 /// `indent + key + gap + description` rows.
-fn column_width(sections: &[Section], key_w: usize) -> usize {
+fn column_width(sections: &[Section], key_w: usize, shown: &dyn Fn(Action) -> bool) -> usize {
     let mut w = 0;
     for section in sections {
+        let rows: Vec<_> = section.rows.iter().filter(|(a, _)| shown(*a)).collect();
+        if rows.is_empty() {
+            continue;
+        }
         w = w.max(section.title.chars().count());
-        for (_, desc) in section.rows {
+        for (_, desc) in rows {
             w = w.max(2 + key_w + 2 + desc.chars().count());
         }
     }

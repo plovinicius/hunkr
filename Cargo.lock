@@ -432,6 +432,7 @@ dependencies = [
  "arboard",
  "clap",
  "crossbeam-channel",
+ "libc",
  "notify",
  "ratatui",
  "regex",

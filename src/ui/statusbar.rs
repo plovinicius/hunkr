@@ -25,18 +25,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(msg) = &app.status_msg {
         format!(" {}", sanitize(msg))
     } else {
-        // Hidden files are excluded from the review totals — if it's hidden from
-        // the review, it shouldn't weigh on the counts.
-        let (mut reviewed, mut unreviewed) = (0u32, 0u32);
-        for i in 0..app.files.len() {
-            if app.is_file_hidden(i) {
-                continue;
-            }
-            match app.review_status(i) {
-                ReviewStatus::Reviewed => reviewed += 1,
-                ReviewStatus::Unreviewed => unreviewed += 1,
-            }
-        }
         let chunk = match &app.diff {
             Some(fd) if !fd.chunks.is_empty() => {
                 format!("chunk {}/{}", app.current_chunk + 1, fd.chunks.len())
@@ -48,25 +36,46 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         } else {
             String::new()
         };
-        // A hidden-files segment appears only when some are hidden; the count is
-        // the same total whichever view is active.
-        let hidden = if app.hidden_count() > 0 {
-            format!("{sep}hidden {}", app.hidden_count())
+        if !app.live {
+            // Pager mode: reviewed/hidden counts don't apply to a static piped
+            // diff, so show only the file count, the read-only label, and chunk.
+            format!(
+                " hunkr{sep}pager (read-only){sep}{} files{sep}{chunk}{filter}",
+                app.files.len(),
+            )
         } else {
-            String::new()
-        };
-        // The hidden view is a distinct mode, so flag it next to the app name.
-        let label = if app.hidden_view {
-            format!("hunkr{sep}hidden view")
-        } else {
-            "hunkr".to_string()
-        };
-        // Each count is its own separator-delimited segment so the groups read
-        // as evenly spaced regardless of glyph width.
-        format!(
-            " {label}{sep}{} {reviewed}{sep}{} {unreviewed}{hidden}{sep}{chunk}{filter}",
-            g.reviewed, g.unreviewed,
-        )
+            // Hidden files are excluded from the review totals — if it's hidden
+            // from the review, it shouldn't weigh on the counts.
+            let (mut reviewed, mut unreviewed) = (0u32, 0u32);
+            for i in 0..app.files.len() {
+                if app.is_file_hidden(i) {
+                    continue;
+                }
+                match app.review_status(i) {
+                    ReviewStatus::Reviewed => reviewed += 1,
+                    ReviewStatus::Unreviewed => unreviewed += 1,
+                }
+            }
+            // A hidden-files segment appears only when some are hidden; the count
+            // is the same total whichever view is active.
+            let hidden = if app.hidden_count() > 0 {
+                format!("{sep}hidden {}", app.hidden_count())
+            } else {
+                String::new()
+            };
+            // The hidden view is a distinct mode, so flag it next to the app name.
+            let label = if app.hidden_view {
+                format!("hunkr{sep}hidden view")
+            } else {
+                "hunkr".to_string()
+            };
+            // Each count is its own separator-delimited segment so the groups read
+            // as evenly spaced regardless of glyph width.
+            format!(
+                " {label}{sep}{} {reviewed}{sep}{} {unreviewed}{hidden}{sep}{chunk}{filter}",
+                g.reviewed, g.unreviewed,
+            )
+        }
     };
 
     let hints = if app.mode == Mode::Filter {
@@ -79,17 +88,30 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 .primary(a)
                 .unwrap_or_else(|| "—".to_string())
         };
-        format!(
-            " {}/{} chunk{sep}{} split{sep}{} review{sep}{} hide{sep}{} copy{sep}{} help{sep}{} quit ",
-            key(Action::NextChunk),
-            key(Action::PrevChunk),
-            key(Action::ToggleView),
-            key(Action::ToggleChunkReviewed),
-            key(Action::ToggleHidden),
-            key(Action::CopyReference),
-            key(Action::Help),
-            key(Action::Quit),
-        )
+        if !app.live {
+            // Pager mode: review/hide don't apply; copy/nav/view still do.
+            format!(
+                " {}/{} chunk{sep}{} split{sep}{} copy{sep}{} help{sep}{} quit ",
+                key(Action::NextChunk),
+                key(Action::PrevChunk),
+                key(Action::ToggleView),
+                key(Action::CopyReference),
+                key(Action::Help),
+                key(Action::Quit),
+            )
+        } else {
+            format!(
+                " {}/{} chunk{sep}{} split{sep}{} review{sep}{} hide{sep}{} copy{sep}{} help{sep}{} quit ",
+                key(Action::NextChunk),
+                key(Action::PrevChunk),
+                key(Action::ToggleView),
+                key(Action::ToggleChunkReviewed),
+                key(Action::ToggleHidden),
+                key(Action::CopyReference),
+                key(Action::Help),
+                key(Action::Quit),
+            )
+        }
     };
 
     // Background first, then the left text. The right-aligned hints are drawn

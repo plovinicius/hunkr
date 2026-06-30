@@ -77,6 +77,12 @@ reviewed state → AI reference copy, with file filter and help.
   keymap), and `[hide]` auto-hide rules (exact names + regex) that combine with interactive
   hides. `C` opens the config in `$EDITOR` (seeding a commented template) and hot-reloads on
   return. `src/config.rs`; see `docs/CONFIG.md` and ARCHITECTURE → Configuration.
+- ✅ **Pager mode** (read-only diff viewer): when stdin isn't a TTY, hunkr reads a piped
+  unified diff (`git diff | hunkr`, or as `pager.diff`/`pager.show`), splits it per file
+  (`split_unified` in `git/diff.rs`, skipping merge `diff --cc` segments), and views it via
+  `App::from_diff` (`live = false`, pre-parsed `preloaded` map) with hot-reload, persistence,
+  hide, and editor disabled. ANSI colour is stripped; crossterm reads keys from `/dev/tty`.
+  `main.rs` (`build_pager_app`, `strip_ansi`), `src/app.rs`, status bar + help affordances.
 
 ## Later (not MVP)
 
